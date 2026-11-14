@@ -1,7 +1,16 @@
 # exchange
 A C++20 limit order matching engine with TCP networking, lock-free queues, and reproducible latency benchmarks.
 
-> **Status: early development.** The build, test and CI setup is in place. The matching engine is specified in [docs/SPEC.md](docs/SPEC.md) and not yet implemented.
+> **Status: in development.** The matching engine is implemented and tested as a library. The TCP server, the command-line client and the benchmarks are not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
+
+## Repository layout
+
+| Path | Content |
+|---|---|
+| `src/exchange/core/` | Order book and matching engine: a library with no I/O |
+| `tests/` | Unit tests |
+| `docs/SPEC.md` | Technical specification |
+| `scripts/check.sh` | Runs every check that CI runs |
 
 ## Building and testing
 
@@ -33,3 +42,5 @@ git ls-files '*.cpp' | xargs clang-tidy -p build/debug --quiet
 ```
 
 The first command reformats the sources in place. The second reports problems and exits with an error if it finds any.
+
+`scripts/check.sh` runs the formatting check, all four presets with both GCC and Clang, and the static analysis.

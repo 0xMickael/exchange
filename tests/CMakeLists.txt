@@ -12,8 +12,11 @@ FetchContent_MakeAvailable(googletest)
 include(GoogleTest)
 
 add_executable(exchange_tests
-    smoke_test.cpp)
+    core/matching_engine_test.cpp
+    core/order_book_test.cpp)
+target_include_directories(exchange_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(exchange_tests PRIVATE
+    exchange_core
     exchange_warnings
     GTest::gtest_main)
 

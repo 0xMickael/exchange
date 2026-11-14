@@ -29,4 +29,5 @@ CheckOptions:
   readability-identifier-naming.ParameterCase: lower_case
   readability-identifier-naming.MemberCase: lower_case
   readability-identifier-naming.PrivateMemberSuffix: _
+  readability-identifier-naming.ProtectedMemberSuffix: _
   readability-identifier-naming.MacroDefinitionCase: UPPER_CASE

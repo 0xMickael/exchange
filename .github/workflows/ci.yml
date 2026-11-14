@@ -57,4 +57,4 @@ jobs:
       - name: Static analysis
         run: |
           cmake --preset debug
-          git ls-files '*.cpp' | xargs clang-tidy-21 -p build/debug --quiet
+          git ls-files '*.cpp' | xargs -P "$(nproc)" -n 1 clang-tidy-21 -p build/debug --quiet
