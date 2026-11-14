@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.preset }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        preset: [debug, release, asan, tsan]
+    env:
+      CXX: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      # Sanitizers reserve fixed address ranges and can abort at startup when
+      # the kernel randomizes mappings with more entropy than they expect.
+      - name: Reduce ASLR entropy for sanitizers
+        if: matrix.preset == 'asan' || matrix.preset == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure, build and test
+        run: cmake --workflow --preset ${{ matrix.preset }}
+
+  lint:
+    name: format and static analysis
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # The tools are pinned to LLVM 21: formatting output and available checks
+      # differ between major versions.
+      - name: Install Ninja, clang-format 21 and clang-tidy 21
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          sudo add-apt-repository -y "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main"
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-format-21 clang-tidy-21
+
+      - name: Check formatting
+        run: git ls-files '*.cpp' '*.hpp' | xargs clang-format-21 --dry-run --Werror
+
+      # clang-tidy reads the compiler flags of each file from the
+      # compile_commands.json that the configure step writes.
+      - name: Static analysis
+        run: |
+          cmake --preset debug
+          git ls-files '*.cpp' | xargs clang-tidy-21 -p build/debug --quiet
