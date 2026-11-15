@@ -51,3 +51,41 @@ How to read it:
 - The mean is higher than the median because a few commands are much slower than the others: an aggressive order that trades with several resting orders, or a command interrupted by the operating system.
 - The maximum varies by a factor of 50 between runs. It reflects interruptions of the virtual machine, not the engine.
 - Run 4 is visibly slower than the others. This kind of variation between runs is normal on a laptop under WSL2, which is why the summary is a median over runs.
+
+## Queue benchmark
+
+Sends commands from one thread to another, through the lock-free `SpscQueue` and through the same ring buffer protected by a mutex.
+
+```sh
+./build/release/bench/exchange-bench queue
+```
+
+### Baseline
+
+| | |
+|---|---|
+| Date | 2026-11-15 |
+| Processor | Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz, 8 logical CPUs |
+| System | Linux 6.18.58.1-microsoft-standard-WSL2 (WSL2) |
+| Compiler | GCC 15.2.0 |
+| Build | Release, `-O3 -DNDEBUG` |
+| Messages | 10,000,000 per run, 48 bytes each |
+| Queue capacity | 4,096 |
+
+Throughput in messages per second:
+
+| Run | `SpscQueue` | Mutex queue |
+|---|---|---|
+| 1 | 27,332,344 | 6,997,030 |
+| 2 | 26,278,046 | 6,323,154 |
+| 3 | 27,244,474 | 6,164,789 |
+| 4 | 25,693,882 | 6,610,145 |
+| 5 | 52,527,739 | 7,188,455 |
+| **median** | **27,244,474** | **6,610,145** |
+
+The lock-free queue transferred 4.1 times as many messages as the mutex queue. The ratio itself varies between sessions on this machine, from about 3 to 6; what is stable is that the lock-free queue is several times faster. The raw output is in [benchmarks/queue-baseline.json](benchmarks/queue-baseline.json).
+
+How to read it:
+
+- Both threads spin, so this is the most favorable situation for a lock-free queue and a hard one for a mutex, which the two threads fight over constantly.
+- Either queue is faster than the matching engine, which handles about 2 million commands per second in the engine benchmark. In this system the queue is not the bottleneck; the reason to prefer the lock-free queue is that a thread can never be made to wait by the other one holding a lock.

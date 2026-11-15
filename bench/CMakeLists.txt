@@ -4,11 +4,12 @@ add_library(exchange_bench_lib STATIC
     engine_benchmark.cpp
     environment.cpp
     latency.cpp
+    queue_benchmark.cpp
     report.cpp
     workload.cpp)
 target_include_directories(exchange_bench_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(exchange_bench_lib
-    PUBLIC exchange_core
+    PUBLIC exchange_core exchange_queue
     PRIVATE exchange_warnings)
 
 # Recorded in every report, so that a result states how its binary was built.

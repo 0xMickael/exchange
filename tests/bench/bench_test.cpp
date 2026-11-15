@@ -1,6 +1,8 @@
 #include "engine_benchmark.hpp"
 #include "environment.hpp"
 #include "latency.hpp"
+#include "mutex_queue.hpp"
+#include "queue_benchmark.hpp"
 #include "report.hpp"
 #include "workload.hpp"
 
@@ -224,6 +226,46 @@ TEST(BenchClock, MeasuresAKnownInterval) {
     EXPECT_NEAR(static_cast<double>(bench_clock.to_nanoseconds(last - first)), wall_ns,
                 wall_ns * 0.05);
     EXPECT_GT(bench_clock.reading_cost_ns(), 0.0);
+}
+
+// --- Queue benchmark ---
+
+TEST(QueueBenchmark, TransfersEveryMessageThroughBothQueues) {
+    QueueBenchmarkConfig config;
+    config.messages = 20'000;
+    config.capacity = 64;
+    config.runs = 2;
+
+    const QueueBenchmarkResult result = run_queue_benchmark(config);
+
+    EXPECT_EQ(result.error, "");
+    EXPECT_GT(result.message_size, 0U);
+    ASSERT_EQ(result.spsc_throughput.size(), 2U);
+    ASSERT_EQ(result.mutex_throughput.size(), 2U);
+    EXPECT_GT(result.spsc_throughput[0], 0.0);
+    EXPECT_GT(result.mutex_throughput[0], 0.0);
+
+    std::ostringstream json;
+    print_queue_json(json, detect_environment(), config, result);
+    EXPECT_NE(json.str().find("\"benchmark\": \"queue\""), std::string::npos);
+}
+
+TEST(MutexQueue, BehavesLikeABoundedFifo) {
+    MutexQueue<int> queue(2);
+    int value = 0;
+
+    EXPECT_FALSE(queue.try_pop(value));
+    EXPECT_TRUE(queue.try_push(1));
+    EXPECT_TRUE(queue.try_push(2));
+    EXPECT_FALSE(queue.try_push(3));
+    EXPECT_TRUE(queue.try_pop(value));
+    EXPECT_EQ(value, 1);
+    EXPECT_TRUE(queue.try_push(3));
+    EXPECT_TRUE(queue.try_pop(value));
+    EXPECT_EQ(value, 2);
+    EXPECT_TRUE(queue.try_pop(value));
+    EXPECT_EQ(value, 3);
+    EXPECT_FALSE(queue.try_pop(value));
 }
 
 TEST(Environment, IsDetected) {

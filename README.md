@@ -1,13 +1,14 @@
 # exchange
 A C++20 limit order matching engine with TCP networking, lock-free queues, and reproducible latency benchmarks.
 
-> **Status: in development.** The matching engine is implemented and tested as a library, with a replay tool and a benchmark. The TCP server and the command-line client are not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
+> **Status: in development.** The matching engine is implemented and tested as a library, with a replay tool and benchmarks, and the lock-free queue that will connect the server threads. The TCP server and the command-line client are not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
 
 ## Repository layout
 
 | Path | Content |
 |---|---|
 | `src/exchange/core/` | Order book and matching engine: a library with no I/O |
+| `src/exchange/queue/` | Lock-free single-producer single-consumer queue |
 | `apps/replay/` | `exchange-replay`, which runs a command script through the engine |
 | `bench/` | `exchange-bench`, the benchmark tool |
 | `tests/` | Unit tests, replay scenarios, and a randomized comparison against a reference engine |
@@ -47,11 +48,12 @@ The script and output formats are described in [docs/SPEC.md](docs/SPEC.md), sec
 
 ## Benchmark
 
-`exchange-bench engine` measures the matching engine alone and reports the latency distribution and the throughput. Build it with the `release` preset:
+`exchange-bench` has two benchmarks. `engine` measures the matching engine alone and reports the latency distribution and the throughput. `queue` compares the lock-free queue with a mutex-protected one. Build them with the `release` preset:
 
 ```sh
 cmake --workflow --preset release
 ./build/release/bench/exchange-bench engine
+./build/release/bench/exchange-bench queue
 ```
 
 Measured results, with the machine and method they come from, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).

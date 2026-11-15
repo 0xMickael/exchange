@@ -223,14 +223,49 @@ These hold after every command. A test-only checker verifies them.
 - **I6.** Each session's order set contains exactly that session's active orders.
 - **I7.** Every `Trade` is preceded by exactly two `Fill` events with the same price and quantity.
 
-## 6–11. Sections to be written
+## 6–8. Sections to be written
 
 | # | Section | Needed before |
 |---|---|---|
 | 6 | Event sequencing, market data, book snapshot | Wire protocol |
 | 7 | Wire protocol (framing, encoding, message tables, versioning, limits) | Codec |
 | 8 | Sessions (connection lifecycle, ownership) | Server |
-| 9 | Threading model (ownership, queues, wake-ups, startup, shutdown) | Engine thread |
+
+## 9. Threading model
+
+Sections 9.2 and later (thread ownership, wake-ups, startup and shutdown) are written with the server.
+
+### 9.1 Bounded SPSC queue
+
+Threads exchange messages through `SpscQueue<T>`, a bounded ring buffer for exactly one producer thread and one consumer thread.
+
+**Contract.**
+
+- `try_push` may be called by one thread only, the producer. `try_pop` may be called by one thread only, the consumer. Any other use is a data race.
+- The capacity is fixed at construction and rounded up to a power of two.
+- `try_push` on a full queue returns `false` and changes nothing. `try_pop` on an empty queue returns `false` and changes nothing. What a thread does next (retry, wait, apply backpressure) is decided by the caller, as specified in section 10.
+- Elements are delivered exactly once, in the order they were pushed.
+- Neither operation blocks, allocates, or makes a system call.
+- `T` must be trivially copyable, so that a slot can be overwritten without running constructors or destructors.
+
+**Synchronization.** The queue keeps two positions that only ever increase: `tail`, written only by the producer, and `head`, written only by the consumer. There is no lock.
+
+| Access | Memory order | Reason |
+|---|---|---|
+| A thread loads its own position | `relaxed` | No other thread writes it. |
+| The producer stores `tail` after writing a slot | `release` | Publishes the slot's content together with the new position. |
+| The consumer loads `tail` | `acquire` | Guarantees that every slot before `tail` is completely written. |
+| The consumer stores `head` after reading a slot | `release` | Publishes that the slot has been read. |
+| The producer loads `head` | `acquire` | Guarantees that the consumer has finished reading a slot before it is overwritten. |
+
+`head` and `tail` are each aligned to their own 64-byte cache line, so that the producer's writes do not invalidate the cache line the consumer is working with, and conversely.
+
+**Validation.** Single-thread tests cover the boundaries (empty, full, wrap-around). Two-thread tests transfer a known sequence and check order and integrity, and run under ThreadSanitizer in CI. Weakening the `release`/`acquire` pair on `tail` to `relaxed` still passes the functional test on x86-64 but is reported by ThreadSanitizer as a data race: the functional test alone cannot validate the memory orderings.
+
+## 10–11. Sections to be written
+
+| # | Section | Needed before |
+|---|---|---|
 | 10 | Backpressure and delivery contract | Engine thread |
 | 11 | Error handling (business reject, protocol error, fatal error) | Server |
 
@@ -318,7 +353,15 @@ By default the benchmark reads the processor's timestamp counter (TSC) and conve
 
 Every report states which clock was used, the smallest interval it can measure, and the cost of one reading. Each latency sample includes about one reading cost; it is not subtracted.
 
-### 13.5 Known limits
+### 13.5 Queue benchmark
+
+**Boundary.** The time for a consumer thread to receive a fixed number of commands sent by a producer thread, from the start signal to the last message. The result is a throughput in messages per second. It is not a latency measurement.
+
+**Procedure.** The same stream is transferred through `SpscQueue` and through a queue with the same ring buffer protected by one mutex, alternately, for `runs` runs. Both threads spin while the queue is full or empty. The consumer checks that the messages arrive in order.
+
+The comparison answers one question: whether the lock-free queue transfers more messages than the simplest correct alternative when both threads are busy. It says nothing about behavior when a thread sleeps while waiting.
+
+### 13.6 Known limits
 
 - Measurements taken under WSL2 run in a virtual machine. They are labeled as such and are indicative, especially the high percentiles and the maximum.
 - The benchmark does not pin its thread to a core, isolate cores, or control processor frequency scaling.
@@ -345,6 +388,7 @@ Every report states which clock was used, the smallest interval it can measure, 
 | D9 | The book uses standard containers: an ordered map of price levels per side, a linked list of orders per level, and a hash map from `OrderId` to the order's position. | A sorted array of levels; an array indexed by price; a custom memory pool. | It is the simplest structure with the right complexity for every operation. It is the baseline that later optimizations must beat in a benchmark. |
 | D10 | `Price`, `Quantity` and the identifier types are plain integer aliases. Aggregates are built with designated initializers, which static analysis enforces. | A distinct wrapper type for each. | Wrapper types catch swapped arguments at compile time but need operator boilerplate. Naming every field at the construction site covers most of the same risk. |
 | D11 | Latencies are timed with the processor's timestamp counter, calibrated against `steady_clock` and cross-checked after every pass. | `steady_clock` only. | Under WSL2 `steady_clock` advances in steps of 100 ns, which is too coarse for operations of about 500 ns. |
+| D12 | Threads communicate through a lock-free SPSC ring buffer written for this project. | A queue protected by a mutex; an existing library. | Writing it is one of the project's goals. It is kept only because the benchmark shows a gain over the mutex version (docs/BENCHMARKS.md). |
 
 ## 16. Open questions
 

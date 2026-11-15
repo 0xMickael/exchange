@@ -1,0 +1,8 @@
+{
+  "benchmark": "queue",
+  "environment": {"compiler": "GCC 15.2.0", "build_type": "Release", "compiler_flags": "-O3 -DNDEBUG", "operating_system": "Linux 6.18.58.1-microsoft-standard-WSL2", "wsl": true, "cpu_model": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz", "logical_cpus": 8},
+  "method": {"messages": 10000000, "message_size": 48, "capacity": 4096, "runs": 5},
+  "spsc_messages_per_second": [27332344, 26278046, 27244474, 25693882, 52527739],
+  "mutex_messages_per_second": [6997030, 6323154, 6164789, 6610145, 7188455],
+  "median": {"spsc_messages_per_second": 27244474, "mutex_messages_per_second": 6610145, "ratio": 4.12}
+}
