@@ -268,11 +268,66 @@ For each command, the line `> ` followed by the command, then one line per event
 
 Reasons are written in lower case with underscores: `invalid_client_order_id`, `invalid_price`, `invalid_quantity`, `unknown_order`, `requested`, `session_closed`.
 
-## 13–14. Sections to be written
+## 13. Benchmark methodology
+
+### 13.1 Rules
+
+- A result always states its timing boundary: where the clock starts and where it stops. Results with different boundaries are never compared.
+- A result always states its environment: processor, operating system, whether it ran under WSL2, compiler and version, compiler flags and build type.
+- Only numbers that were measured are published. A build with a sanitizer or with assertions enabled is not a performance measurement, and the tool says so.
+- The workload is generated from a seed and is identical on every platform, so a result can be reproduced.
+- Nothing in the timed region logs, prints, or allocates for the benchmark's own bookkeeping.
+
+### 13.2 Workload
+
+A synthetic order flow around a fixed mid price.
+
+| Kind | Description |
+|---|---|
+| Passive order | A buy priced 1 to `price_levels` ticks below the mid price, or a sell priced as far above it. It rests. |
+| Aggressive order | A buy priced `price_levels` ticks above the mid price, or a sell priced as far below it. It trades with the best opposite levels. |
+| Cancel | Cancels one live order chosen at random, sent by the session that owns it. |
+
+Side, price distance, quantity (1 to `max_quantity`) and session are drawn uniformly. Before measurement, `initial_orders` passive orders fill the book. Each measured command is then an aggressive order with probability `aggressive_percent`, a cancel with probability `cancel_percent`, and a passive order otherwise. If the number of live orders falls below half of `initial_orders`, only passive orders are generated until it recovers; above twice `initial_orders`, cancels replace passive orders.
+
+The generator runs the commands through an engine of its own, so every cancel targets an order that is live at that point. Every generated command is valid.
+
+This workload is not a model of a real market. It exercises the three paths of the engine in controlled proportions.
+
+### 13.3 Engine benchmark
+
+**Boundary.** The time of one call to `MatchingEngine::process()`: the clock is read immediately before the call and immediately after it returns. It includes validation, matching, book updates and the construction of events in a pre-allocated buffer. It excludes parsing, networking, queues and thread hand-offs.
+
+**Procedure.**
+
+1. Generate the workload in memory.
+2. For each run, create a new engine and apply the setup commands, untimed.
+3. Latency pass: time each measured command individually and keep every sample.
+4. Throughput pass: on another new engine, time the whole measured stream with two clock readings.
+5. Execute `warmup_runs` unmeasured runs first, then `runs` measured runs.
+
+Each run reports the minimum, the 50th, 95th, 99th and 99.9th percentiles, the maximum and the mean latency, and the throughput. Percentiles use the nearest-rank definition on the full set of samples. The summary line is the median of each statistic across runs.
+
+Every pass replays the same commands, so it must produce the same number of events as the generator did; a run that does not is reported as an error.
+
+### 13.4 Clock
+
+A latency of a few hundred nanoseconds needs a clock with a much smaller step. `std::chrono::steady_clock` does not always provide one: under WSL2 it advances in steps of 100 ns.
+
+By default the benchmark reads the processor's timestamp counter (TSC) and converts ticks to nanoseconds with a rate calibrated against `steady_clock` at startup. The TSC is used only if two successive calibrations agree within 0.1 %; otherwise the benchmark falls back to `steady_clock`. After each latency pass, the duration of the pass according to the TSC is compared with its duration according to `steady_clock`; a difference above 1 % is reported as an error.
+
+Every report states which clock was used, the smallest interval it can measure, and the cost of one reading. Each latency sample includes about one reading cost; it is not subtracted.
+
+### 13.5 Known limits
+
+- Measurements taken under WSL2 run in a virtual machine. They are labeled as such and are indicative, especially the high percentiles and the maximum.
+- The benchmark does not pin its thread to a core, isolate cores, or control processor frequency scaling.
+- The maximum latency mostly reflects interruptions by the operating system, not the engine.
+
+## 14. Section to be written
 
 | # | Section | Needed before |
 |---|---|---|
-| 13 | Benchmark methodology | Engine benchmark |
 | 14 | Testing strategy and acceptance criteria | First release |
 
 ## 15. Decision log
@@ -289,6 +344,7 @@ Reasons are written in lower case with underscores: `invalid_client_order_id`, `
 | D8 | A single cancel reject reason, `UnknownOrder`. | Separate reasons for filled, cancelled, and foreign orders. | Avoids unbounded history and does not reveal other sessions' orders. |
 | D9 | The book uses standard containers: an ordered map of price levels per side, a linked list of orders per level, and a hash map from `OrderId` to the order's position. | A sorted array of levels; an array indexed by price; a custom memory pool. | It is the simplest structure with the right complexity for every operation. It is the baseline that later optimizations must beat in a benchmark. |
 | D10 | `Price`, `Quantity` and the identifier types are plain integer aliases. Aggregates are built with designated initializers, which static analysis enforces. | A distinct wrapper type for each. | Wrapper types catch swapped arguments at compile time but need operator boilerplate. Naming every field at the construction site covers most of the same risk. |
+| D11 | Latencies are timed with the processor's timestamp counter, calibrated against `steady_clock` and cross-checked after every pass. | `steady_clock` only. | Under WSL2 `steady_clock` advances in steps of 100 ns, which is too coarse for operations of about 500 ns. |
 
 ## 16. Open questions
 

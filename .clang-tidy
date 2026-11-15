@@ -9,6 +9,7 @@ Checks: >
   -misc-include-cleaner,
   -misc-non-private-member-variables-in-classes,
   modernize-*,
+  -modernize-raw-string-literal,
   -modernize-use-trailing-return-type,
   performance-*,
   readability-*,

@@ -39,6 +39,7 @@ target_compile_options(exchange_warnings INTERFACE
 
 add_subdirectory(src)
 add_subdirectory(apps)
+add_subdirectory(bench)
 
 include(CTest)
 if(BUILD_TESTING)
