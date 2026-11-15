@@ -16,9 +16,21 @@ target_link_libraries(exchange_protocol
     PUBLIC exchange_core
     PRIVATE exchange_warnings)
 
+add_library(exchange_net STATIC
+    exchange/net/tcp.cpp)
+target_include_directories(exchange_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(exchange_net PRIVATE exchange_warnings)
+
 add_library(exchange_server STATIC
-    exchange/net/tcp.cpp
     exchange/server/server.cpp)
 target_link_libraries(exchange_server
-    PUBLIC exchange_core exchange_protocol
+    PUBLIC exchange_core exchange_net exchange_protocol
+    PRIVATE exchange_warnings)
+
+add_library(exchange_client STATIC
+    exchange/client/book_view.cpp
+    exchange/client/cli.cpp
+    exchange/client/cli_session.cpp)
+target_link_libraries(exchange_client
+    PUBLIC exchange_core exchange_net exchange_protocol
     PRIVATE exchange_warnings)

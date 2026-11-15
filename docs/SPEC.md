@@ -341,6 +341,8 @@ Any other value of an enumerated field is a protocol error (`bad field`).
 
 Requests are not answered one by one: the server's messages form a stream, and a client matches them to its requests with `client_order_id` and `order_id`.
 
+**Knowing that everything has been answered.** A request can produce several messages (an accepted order followed by fills), and nothing marks the last one. A client that needs to know that the server has finished with everything it sent can send a `CancelOrder` for `order_id` 0. That identifier is never assigned (section 2), so the request has no effect and is always answered by `CancelRejected` with `order_id` 0. Because that request passes through the engine after the earlier ones, its answer arrives after all of theirs. The command-line client does this after every command.
+
 ### 7.6 Protocol errors
 
 A protocol error means the two sides no longer agree on where messages begin, or one side does not speak the protocol. It cannot be recovered from within the stream.
@@ -592,8 +594,9 @@ The comparison answers one question: whether the lock-free queue transfers more 
 | D14 | Market data sequence numbers are assigned by the publisher and exist only on the wire. | Sequence fields inside the engine's `Trade` and `BookUpdate` events. | The engine's output stays a function of its commands alone, and replay files do not depend on a numbering that only matters to network clients. |
 | D15 | The wire format is little-endian with a 3-byte header (`length`, `type`) and fixed-size bodies, encoded field by field. | Big-endian "network order"; sending C++ structs; a text protocol. | Every machine this runs on is little-endian. Field-by-field encoding makes the format independent of compiler padding and alignment. Fixed sizes make a malformed length detectable. |
 | D16 | The network side is one thread using level-triggered `epoll` on non-blocking sockets. | One thread per connection; edge-triggered `epoll`; `io_uring`. | A thread per connection would need locks around everything shared. Edge-triggered mode reports readiness only once, so a missed read stalls a connection silently; level-triggered mode cannot lose a readiness report. |
+| D17 | The command-line client shows prices in ticks and quantities in units, as whole numbers. | Decimal display with a configurable tick size. | A conversion would only exist in the client and add a place where rounding could go wrong; integers are what the protocol and the engine use. |
+| D18 | The command-line client waits for the server's answers after each command, using the cancel of order 0 as a marker. | Print answers whenever they arrive; add a dedicated ping message to the protocol. | It makes scripted sessions produce the same transcript on every run. The marker must pass through the engine to be ordered after the engine's events, which an existing request already does. |
 
 ## 16. Open questions
 
 - Should the engine cap the number of active orders and reject new ones beyond it? A bound keeps memory use predictable; the cost is one more reject reason.
-- How ticks and units are displayed by the CLI (for example 1 tick = 0.01 USD).

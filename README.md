@@ -1,7 +1,7 @@
 # exchange
 A C++20 limit order matching engine with TCP networking, lock-free queues, and reproducible latency benchmarks.
 
-> **Status: in development.** The matching engine, the binary protocol and a single-threaded TCP server work and are tested. The command-line client, the two-thread server and the end-to-end benchmark are not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
+> **Status: in development.** The matching engine, the binary protocol, a single-threaded TCP server and the command-line client work and are tested. The two-thread server and the end-to-end benchmark are not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
 
 ## Repository layout
 
@@ -12,7 +12,9 @@ A C++20 limit order matching engine with TCP networking, lock-free queues, and r
 | `src/exchange/protocol/` | Binary wire protocol: message definitions, encoder and decoder |
 | `src/exchange/net/` | Small wrappers over Linux sockets |
 | `src/exchange/server/` | TCP server: event loop, sessions, routing of events to clients |
+| `src/exchange/client/` | Command-line client logic: commands, display, local copy of the book |
 | `apps/server/` | `exchange-server` |
+| `apps/cli/` | `exchange-cli` |
 | `apps/replay/` | `exchange-replay`, which runs a command script through the engine |
 | `bench/` | `exchange-bench`, the benchmark tool |
 | `tests/` | Unit tests, replay scenarios, and a randomized comparison against a reference engine |
@@ -40,13 +42,43 @@ This configures, builds and runs the tests in `build/debug`. The available prese
 
 To use a specific compiler, set `CXX` before the first configure of a preset, for example `CXX=clang++ cmake --workflow --preset debug`.
 
-## Running the server
+## Trying it
+
+Start the server in one terminal:
 
 ```sh
 ./build/debug/apps/exchange-server --port 9000
 ```
 
-The server listens on `127.0.0.1` by default and runs until interrupted with Ctrl-C. It speaks the binary protocol of [docs/SPEC.md](docs/SPEC.md), section 7. The command-line client is not written yet; for now the server is exercised by the integration tests in `tests/server/`.
+Then start a client in two other terminals:
+
+```sh
+./build/debug/apps/exchange-cli --port 9000
+```
+
+In the first client, place two sell orders. In the second, look at the book and buy:
+
+```text
+> sell 101 5                          > book
+order 1 accepted: sell 5 @ 101                        BIDS |       ASKS
+> sell 102 10                           quantity     price |      price  quantity
+order 2 accepted: sell 10 @ 102                            |        101         5
+                                                           |        102        10
+                                      > buy 102 8
+                                      order 3 accepted: buy 8 @ 102
+                                      order 3 filled: 5 @ 101, 3 remaining
+                                      market trade: 5 @ 101, buy side aggressor
+                                      order 3 filled: 3 @ 102, complete
+                                      market trade: 3 @ 102, buy side aggressor
+```
+
+The first client is told that its orders were filled. `help` lists the commands. Prices are in ticks and quantities in units, both whole numbers. Leaving a client cancels its orders.
+
+The client also reads commands from a pipe or a file, and then prints the same transcript on every run:
+
+```sh
+printf 'buy 100 5\nbook\n' | ./build/debug/apps/exchange-cli --port 9000
+```
 
 ## Replaying a command script
 
