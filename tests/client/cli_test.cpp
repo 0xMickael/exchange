@@ -1,13 +1,20 @@
 #include "exchange/client/cli.hpp"
 
+#include "exchange/net/file_descriptor.hpp"
+#include "exchange/net/tcp.hpp"
 #include "exchange/server/server.hpp"
 #include "support/test_client.hpp"
 
 #include <gtest/gtest.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <array>
+#include <cstdint>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -128,16 +135,20 @@ TEST_F(CliTest, LeavingCancelsTheClientsOrders) {
 }
 
 TEST(CliConnection, ReportsAServerThatCannotBeReached) {
-    // Find a port with nothing listening on it: open a server, note its port, close it.
-    std::uint16_t free_port = 0;
-    {
-        const server::Server server(server::ServerConfig{.port = 0});
-        free_port = server.port();
-    }
+    // A port that refuses connections for as long as the test runs: a socket
+    // is bound to it, so no other program can take it, but it does not listen.
+    const net::FileDescriptor bound(::socket(AF_INET, SOCK_STREAM, 0));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    // NOLINTNEXTLINE(*-reinterpret-cast): the socket API takes addresses this way.
+    ASSERT_EQ(::bind(bound.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)), 0);
+    const std::uint16_t port = net::local_port(bound);
+
     const int input = input_containing("book\n");
     std::ostringstream output;
 
-    EXPECT_EQ(run_cli(CliOptions{.port = free_port}, input, output), 1);
+    EXPECT_EQ(run_cli(CliOptions{.port = port}, input, output), 1);
     ::close(input);
 
     EXPECT_NE(output.str().find("cannot connect"), std::string::npos);
@@ -148,18 +159,26 @@ TEST(CliConnection, ReportsAServerThatGoesAway) {
     const std::uint16_t port = server->port();
     std::jthread server_thread([&server] { server->run(); });
 
-    // A pipe that stays open: the client is waiting for a command when the
-    // server stops.
+    test::TestClient watcher(port);
+    watcher.hello();
+    watcher.send(protocol::Subscribe{});
+    watcher.expect<protocol::SnapshotBegin>();
+    watcher.expect<protocol::SnapshotEnd>();
+
+    // The client's input is a pipe that stays open: after its one command, the
+    // client waits for more, and that is when the server stops.
     std::array<int, 2> ends{};
     ASSERT_EQ(::pipe(ends.data()), 0);
+    const std::string command = "buy 100 1\n";
+    ASSERT_EQ(::write(ends[1], command.data(), command.size()),
+              static_cast<ssize_t>(command.size()));
     std::ostringstream output;
     int status = -1;
     std::jthread client_thread(
         [&] { status = run_cli(CliOptions{.port = port}, ends[0], output); });
 
-    // Wait until the client has a session, then take the server away.
-    test::TestClient probe(port);
-    probe.hello();
+    // Seeing the client's order in the market proves that it is connected.
+    EXPECT_EQ(watcher.expect<protocol::BookUpdate>().total_quantity, 1U);
     server->request_stop();
     server_thread.join();
     server.reset();
