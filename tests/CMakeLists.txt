@@ -18,6 +18,7 @@ add_executable(exchange_tests
     core/order_book_test.cpp
     core/replay_test.cpp
     core/text_test.cpp
+    protocol/codec_test.cpp
     queue/spsc_queue_test.cpp
     support/reference_engine.cpp)
 target_compile_definitions(exchange_tests PRIVATE
@@ -26,6 +27,7 @@ target_include_directories(exchange_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(exchange_tests PRIVATE
     exchange_bench_lib
     exchange_core
+    exchange_protocol
     exchange_queue
     exchange_warnings
     GTest::gtest_main)
