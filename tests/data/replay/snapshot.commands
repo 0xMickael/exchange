@@ -1,0 +1,9 @@
+# A snapshot lists bids then asks, best price first, and changes nothing.
+snapshot 9
+new 1 1 buy 99 5
+new 2 1 buy 100 2
+new 1 2 sell 102 4
+new 1 3 sell 101 1
+snapshot 9
+new 2 2 buy 101 1
+snapshot 9

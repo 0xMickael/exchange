@@ -17,7 +17,8 @@ constexpr std::string_view usage =
     "Commands, one per line:\n"
     "  new <session> <client_order_id> <buy|sell> <price> <quantity>\n"
     "  cancel <session> <order_id>\n"
-    "  close <session>\n";
+    "  close <session>\n"
+    "  snapshot <session>\n";
 
 } // namespace
 

@@ -148,6 +148,19 @@ void MatchingEngine::handle(const SessionClosed& command, std::vector<Event>& ev
     sessions_.erase(it);
 }
 
+void MatchingEngine::handle(const SnapshotRequest& command, std::vector<Event>& events) const {
+    events.emplace_back(SnapshotBegin{.session_id = command.session_id});
+    for (const Side side : {Side::Buy, Side::Sell}) {
+        for (const LevelInfo& level : book_.levels(side)) {
+            events.emplace_back(SnapshotLevel{.session_id = command.session_id,
+                                              .side = side,
+                                              .price = level.price,
+                                              .total_quantity = level.total_quantity});
+        }
+    }
+    events.emplace_back(SnapshotEnd{.session_id = command.session_id});
+}
+
 void MatchingEngine::cancel(OrderId order_id, CancelReason reason, std::vector<Event>& events) {
     const Order* order = book_.find(order_id);
     assert(order != nullptr);

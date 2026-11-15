@@ -39,6 +39,7 @@ private:
     void handle(const NewOrder& command, std::vector<Event>& events);
     void handle(const CancelOrder& command, std::vector<Event>& events);
     void handle(const SessionClosed& command, std::vector<Event>& events);
+    void handle(const SnapshotRequest& command, std::vector<Event>& events) const;
 
     void match(const NewOrder& command, OrderId order_id, Quantity& remaining,
                std::vector<Event>& events);

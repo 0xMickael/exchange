@@ -41,6 +41,19 @@ inline Event cancel_rejected(SessionId session, OrderId order) {
         .session_id = session, .order_id = order, .reason = CancelRejectReason::UnknownOrder};
 }
 
+inline Event snapshot_begin(SessionId session) {
+    return SnapshotBegin{.session_id = session};
+}
+
+inline Event snapshot_level(SessionId session, Side side, Price price, Quantity total) {
+    return SnapshotLevel{
+        .session_id = session, .side = side, .price = price, .total_quantity = total};
+}
+
+inline Event snapshot_end(SessionId session) {
+    return SnapshotEnd{.session_id = session};
+}
+
 inline Event trade(Price price, Quantity quantity, Side aggressor) {
     return Trade{.price = price, .quantity = quantity, .aggressor_side = aggressor};
 }

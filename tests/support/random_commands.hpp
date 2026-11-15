@@ -31,6 +31,9 @@ public:
             last_client_order_id_.at(session) = 0;
             return SessionClosed{.session_id = session};
         }
+        if (roll < 5) {
+            return SnapshotRequest{.session_id = random_session()};
+        }
         if (roll < 30) {
             // Covers live orders, dead orders and identifiers never assigned.
             return CancelOrder{.session_id = random_session(),

@@ -16,6 +16,9 @@ using test::cancel_rejected;
 using test::cancelled;
 using test::fill;
 using test::rejected;
+using test::snapshot_begin;
+using test::snapshot_end;
+using test::snapshot_level;
 using test::text;
 using test::trade;
 
@@ -395,6 +398,36 @@ TEST_F(MatchingEngineTest, ClosingASessionDiscardsItsState) {
     // The client order id sequence starts again from scratch.
     EXPECT_EQ(text(submit(a, 1, Side::Buy, 100, 1)),
               text({accepted(a, 1, 2), book(Side::Buy, 100, 1)}));
+}
+
+// --- Snapshot (sections 5.3 and 6.4) ---
+
+TEST_F(MatchingEngineTest, SnapshotOfAnEmptyBook) {
+    EXPECT_EQ(text(run(SnapshotRequest{.session_id = a})),
+              text({snapshot_begin(a), snapshot_end(a)}));
+}
+
+TEST_F(MatchingEngineTest, SnapshotListsBidsThenAsksBestPriceFirst) {
+    rest(a, Side::Buy, 99, 5);
+    rest(b, Side::Buy, 100, 2);
+    rest(a, Side::Buy, 100, 3);
+    rest(a, Side::Sell, 103, 7);
+    rest(b, Side::Sell, 102, 1);
+
+    EXPECT_EQ(text(run(SnapshotRequest{.session_id = c})),
+              text({snapshot_begin(c), snapshot_level(c, Side::Buy, 100, 5),
+                    snapshot_level(c, Side::Buy, 99, 5), snapshot_level(c, Side::Sell, 102, 1),
+                    snapshot_level(c, Side::Sell, 103, 7), snapshot_end(c)}));
+}
+
+TEST_F(MatchingEngineTest, SnapshotChangesNothing) {
+    rest(a, Side::Buy, 100, 5);
+    run(SnapshotRequest{.session_id = b});
+
+    EXPECT_EQ(bids(), (Levels{{100, 5}}));
+    // The requesting session has no state: its first client order id is still free.
+    EXPECT_EQ(text(submit(b, 1, Side::Buy, 100, 1)),
+              text({accepted(b, 1, 2), book(Side::Buy, 100, 6)}));
 }
 
 // --- Determinism (section 5.5) ---

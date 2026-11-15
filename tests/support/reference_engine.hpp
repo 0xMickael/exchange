@@ -35,6 +35,7 @@ private:
     void new_order(const NewOrder& command, std::vector<Event>& events);
     void cancel_order(const CancelOrder& command, std::vector<Event>& events);
     void close_session(const SessionClosed& command, std::vector<Event>& events);
+    void snapshot(const SnapshotRequest& command, std::vector<Event>& events) const;
 
     [[nodiscard]] Quantity level_total(Side side, Price price) const;
     // The resting order that an incoming order must trade with next, or

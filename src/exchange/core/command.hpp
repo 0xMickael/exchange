@@ -31,6 +31,13 @@ struct SessionClosed {
     friend bool operator==(const SessionClosed&, const SessionClosed&) = default;
 };
 
-using Command = std::variant<NewOrder, CancelOrder, SessionClosed>;
+// Asks for the content of the book. Changes nothing (SPEC section 6.4).
+struct SnapshotRequest {
+    SessionId session_id;
+
+    friend bool operator==(const SnapshotRequest&, const SnapshotRequest&) = default;
+};
+
+using Command = std::variant<NewOrder, CancelOrder, SessionClosed, SnapshotRequest>;
 
 } // namespace exchange

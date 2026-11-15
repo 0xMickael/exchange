@@ -20,6 +20,7 @@ TEST(Text, CommandsSurviveARoundTrip) {
                  .quantity = 0},
         CancelOrder{.session_id = 3, .order_id = 2},
         SessionClosed{.session_id = 3},
+        SnapshotRequest{.session_id = 3},
     };
 
     for (const Command& command : commands) {
@@ -65,6 +66,8 @@ TEST(Text, ParsingRejectsMalformedLines) {
         "close",
         "close 1 2",
         "close one",
+        "snapshot",
+        "snapshot 1 2",
     };
 
     for (const std::string& line : lines) {

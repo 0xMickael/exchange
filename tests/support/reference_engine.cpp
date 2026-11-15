@@ -24,8 +24,10 @@ void ReferenceEngine::process(const Command& command, std::vector<Event>& events
         new_order(*new_order_command, events);
     } else if (const auto* cancel_command = std::get_if<CancelOrder>(&command)) {
         cancel_order(*cancel_command, events);
+    } else if (const auto* close_command = std::get_if<SessionClosed>(&command)) {
+        close_session(*close_command, events);
     } else {
-        close_session(std::get<SessionClosed>(command), events);
+        snapshot(std::get<SnapshotRequest>(command), events);
     }
 }
 
@@ -186,6 +188,23 @@ void ReferenceEngine::close_session(const SessionClosed& command, std::vector<Ev
                                        .total_quantity = level_total(order.side, order.price)});
     }
     last_client_order_id_.erase(command.session_id);
+}
+
+void ReferenceEngine::snapshot(const SnapshotRequest& command, std::vector<Event>& events) const {
+    events.emplace_back(SnapshotBegin{.session_id = command.session_id});
+    for (const LevelInfo& level : levels(Side::Buy)) {
+        events.emplace_back(SnapshotLevel{.session_id = command.session_id,
+                                          .side = Side::Buy,
+                                          .price = level.price,
+                                          .total_quantity = level.total_quantity});
+    }
+    for (const LevelInfo& level : levels(Side::Sell)) {
+        events.emplace_back(SnapshotLevel{.session_id = command.session_id,
+                                          .side = Side::Sell,
+                                          .price = level.price,
+                                          .total_quantity = level.total_quantity});
+    }
+    events.emplace_back(SnapshotEnd{.session_id = command.session_id});
 }
 
 std::vector<LevelInfo> ReferenceEngine::levels(Side side) const {

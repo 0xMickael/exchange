@@ -56,6 +56,9 @@ struct CommandFormatter {
     std::string operator()(const SessionClosed& c) const {
         return "close " + to_string(c.session_id);
     }
+    std::string operator()(const SnapshotRequest& c) const {
+        return "snapshot " + to_string(c.session_id);
+    }
 };
 
 struct EventFormatter {
@@ -82,6 +85,17 @@ struct EventFormatter {
     std::string operator()(const CancelRejected& e) const {
         return "cancel_rejected session=" + to_string(e.session_id) +
                " order_id=" + to_string(e.order_id) + " reason=" + reason_name(e.reason);
+    }
+    std::string operator()(const SnapshotBegin& e) const {
+        return "snapshot_begin session=" + to_string(e.session_id);
+    }
+    std::string operator()(const SnapshotLevel& e) const {
+        return "snapshot_level session=" + to_string(e.session_id) +
+               " side=" + exchange::to_string(e.side) + " price=" + to_string(e.price) +
+               " total=" + to_string(e.total_quantity);
+    }
+    std::string operator()(const SnapshotEnd& e) const {
+        return "snapshot_end session=" + to_string(e.session_id);
     }
     std::string operator()(const Trade& e) const {
         return "trade price=" + to_string(e.price) + " quantity=" + to_string(e.quantity) +
@@ -168,6 +182,11 @@ std::optional<Command> parse_command(std::string_view line) {
         }
     } else if (words[0] == "close" && words.size() == 2) {
         SessionClosed command{};
+        if (parse_number(words[1], command.session_id)) {
+            return command;
+        }
+    } else if (words[0] == "snapshot" && words.size() == 2) {
+        SnapshotRequest command{};
         if (parse_number(words[1], command.session_id)) {
             return command;
         }

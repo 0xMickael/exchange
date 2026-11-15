@@ -58,6 +58,30 @@ struct CancelRejected {
     friend bool operator==(const CancelRejected&, const CancelRejected&) = default;
 };
 
+// The answer to a SnapshotRequest: SnapshotBegin, one SnapshotLevel per price
+// level, then SnapshotEnd.
+
+struct SnapshotBegin {
+    SessionId session_id;
+
+    friend bool operator==(const SnapshotBegin&, const SnapshotBegin&) = default;
+};
+
+struct SnapshotLevel {
+    SessionId session_id;
+    Side side;
+    Price price;
+    Quantity total_quantity;
+
+    friend bool operator==(const SnapshotLevel&, const SnapshotLevel&) = default;
+};
+
+struct SnapshotEnd {
+    SessionId session_id;
+
+    friend bool operator==(const SnapshotEnd&, const SnapshotEnd&) = default;
+};
+
 // Public events: they describe the market and identify no session or order.
 
 struct Trade {
@@ -77,6 +101,6 @@ struct BookUpdate {
 };
 
 using Event = std::variant<OrderAccepted, OrderRejected, Fill, OrderCancelled, CancelRejected,
-                           Trade, BookUpdate>;
+                           SnapshotBegin, SnapshotLevel, SnapshotEnd, Trade, BookUpdate>;
 
 } // namespace exchange

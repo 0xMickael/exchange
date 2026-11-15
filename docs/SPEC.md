@@ -132,9 +132,10 @@ The engine is a single-threaded library with no I/O, no clock, and no knowledge 
 | `NewOrder` | `session_id`, `client_order_id`, `side`, `price`, `quantity` |
 | `CancelOrder` | `session_id`, `order_id` |
 | `SessionClosed` | `session_id` |
+| `SnapshotRequest` | `session_id` |
 
 A session needs no explicit opening: its state is created by its first `NewOrder`.
-A book snapshot command is specified with market data in section 6.
+`SnapshotRequest` reads the book without changing it; its purpose is explained in section 6.4.
 
 ### 5.2 Events
 
@@ -147,6 +148,9 @@ Private events concern one session. Public events describe the market and identi
 | `Fill` | private | `session_id`, `order_id`, `price`, `quantity`, `remaining_quantity` |
 | `OrderCancelled` | private | `session_id`, `order_id`, `cancelled_quantity`, `reason` (`Requested` or `SessionClosed`) |
 | `CancelRejected` | private | `session_id`, `order_id`, `reason` |
+| `SnapshotBegin` | private | `session_id` |
+| `SnapshotLevel` | private | `session_id`, `side`, `price`, `total_quantity` |
+| `SnapshotEnd` | private | `session_id` |
 | `Trade` | public | `price`, `quantity`, `aggressor_side` |
 | `BookUpdate` | public | `side`, `price`, `total_quantity` (new total of the level; 0 means the level no longer exists) |
 
@@ -165,6 +169,8 @@ The order of events is part of the contract.
 3. If quantity remains: one `BookUpdate` for the level the incoming order rests on.
 
 **`CancelOrder`:** either `OrderCancelled` then `BookUpdate` for the order's level, or exactly one `CancelRejected`.
+
+**`SnapshotRequest`:** `SnapshotBegin`, then one `SnapshotLevel` per bid level from the best price down, then one `SnapshotLevel` per ask level from the best price up, then `SnapshotEnd`. An empty book gives `SnapshotBegin` followed by `SnapshotEnd`.
 
 **`SessionClosed`:** for each cancelled order, `OrderCancelled` then `BookUpdate` for its level. These `OrderCancelled` events are emitted even though the session can no longer receive them, so that every accepted order's history ends with a terminal event.
 
@@ -223,12 +229,139 @@ These hold after every command. A test-only checker verifies them.
 - **I6.** Each session's order set contains exactly that session's active orders.
 - **I7.** Every `Trade` is preceded by exactly two `Fill` events with the same price and quantity.
 
-## 6–8. Sections to be written
+## 6. Event delivery and market data
+
+### 6.1 One ordered stream
+
+The engine processes one command at a time, and the events of a command are ordered by section 5.3. All events therefore form a single sequence. Whatever carries events from the engine to clients must preserve that order: a client receives the events addressed to it in the order the engine emitted them.
+
+### 6.2 Routing
+
+- A private event is delivered to the session it names. If that session no longer exists, the event is discarded.
+- A public event (`Trade`, `BookUpdate`) is delivered to every session that is subscribed to market data at that point of the stream.
+
+A session that takes part in a trade and is subscribed receives both its private `Fill` and the public `Trade`.
+
+### 6.3 Market data sequence numbers
+
+The publisher numbers public events 1, 2, 3, … in stream order, for the whole life of the server. The number is carried on the wire with each `Trade` and `BookUpdate`. It is not part of the engine's events: the engine's output stays independent of who is listening.
+
+A subscribed client must receive consecutive numbers. Delivery is reliable (decision D2), so a gap can only mean a defect; a client that sees one discards its copy of the book and subscribes again.
+
+### 6.4 Subscription and snapshot
+
+A client that wants market data sends a subscribe request. It needs two things: the current content of the book, and every change after that, with nothing missing and nothing applied twice in between.
+
+The subscribe request becomes a `SnapshotRequest` command, which travels through the same path as orders. The engine answers it with the snapshot events of section 5.3, placed in the event stream exactly where the snapshot was taken. The publisher then:
+
+1. sends the snapshot to the session, stating the sequence number of the last public event that preceded it;
+2. marks the session as subscribed when it reaches `SnapshotEnd`.
+
+Every public event after `SnapshotEnd` in the stream is newer than the snapshot, and every one before it is already included. No lock on the book is needed, because the snapshot is taken by the thread that owns the book.
+
+The snapshot contains every level of both sides. Its cost is proportional to the number of levels and is paid on the matching thread; this is accepted because subscriptions are rare compared with orders.
+
+Subscribing again is allowed: the session receives a new snapshot and stays subscribed. There is no unsubscribe; a client stops market data by disconnecting.
+
+### 6.5 Maintaining a book from market data
+
+A client builds the book from the snapshot levels, then applies each `BookUpdate` by replacing the total of that side and price; a total of 0 removes the level. `Trade` events do not change the client's book: the `BookUpdate` that follows already reflects them.
+
+## 7. Wire protocol
+
+### 7.1 Transport and framing
+
+Clients and server exchange binary messages over TCP. One connection is one session.
+
+TCP delivers a stream of bytes with no message boundaries: one read can return half a message or several messages at once. Every message therefore starts with a header that says how long it is.
+
+| Offset | Size | Field | Meaning |
+|---|---|---|---|
+| 0 | 2 | `length` | Number of bytes in the body, after this header |
+| 2 | 1 | `type` | Message type |
+| 3 | `length` | body | Fields of the message, in the order of the tables below |
+
+Rules that apply to every message:
+
+- Integers are little-endian. `u8`, `u16`, `u32`, `u64` are unsigned; `i64` is signed, two's complement.
+- There is no padding between fields.
+- Each message type has one fixed body length. A header whose `length` differs from it, or exceeds 64, is a protocol error.
+- Messages are encoded and decoded field by field. The in-memory layout of a C++ struct is never sent, because it depends on the compiler and the processor.
+
+### 7.2 Messages from client to server
+
+| Type | Name | Body | Body length |
+|---|---|---|---|
+| `0x01` | `Hello` | `magic: u32`, `version: u16` | 6 |
+| `0x02` | `NewOrder` | `client_order_id: u64`, `side: u8`, `price: i64`, `quantity: u64` | 25 |
+| `0x03` | `CancelOrder` | `order_id: u64` | 8 |
+| `0x04` | `Subscribe` | empty | 0 |
+
+### 7.3 Messages from server to client
+
+| Type | Name | Body | Body length |
+|---|---|---|---|
+| `0x81` | `HelloAck` | `version: u16`, `session_id: u64` | 10 |
+| `0x82` | `OrderAccepted` | `client_order_id: u64`, `order_id: u64` | 16 |
+| `0x83` | `OrderRejected` | `client_order_id: u64`, `reason: u8` | 9 |
+| `0x84` | `Fill` | `order_id: u64`, `price: i64`, `quantity: u64`, `remaining_quantity: u64` | 32 |
+| `0x85` | `OrderCancelled` | `order_id: u64`, `cancelled_quantity: u64`, `reason: u8` | 17 |
+| `0x86` | `CancelRejected` | `order_id: u64`, `reason: u8` | 9 |
+| `0x87` | `Trade` | `sequence: u64`, `price: i64`, `quantity: u64`, `aggressor_side: u8` | 25 |
+| `0x88` | `BookUpdate` | `sequence: u64`, `side: u8`, `price: i64`, `total_quantity: u64` | 25 |
+| `0x89` | `SnapshotBegin` | `last_sequence: u64` | 8 |
+| `0x8A` | `SnapshotLevel` | `side: u8`, `price: i64`, `total_quantity: u64` | 17 |
+| `0x8B` | `SnapshotEnd` | empty | 0 |
+| `0x8F` | `ProtocolError` | `code: u8` | 1 |
+
+Messages carry no session identifier: the connection identifies the session.
+
+### 7.4 Field values
+
+| Field | Values |
+|---|---|
+| `magic` | `0x48435845`, which is the ASCII text `EXCH` on the wire |
+| `version` | `1` |
+| `side`, `aggressor_side` | `0` buy, `1` sell |
+| `reason` of `OrderRejected` | `1` invalid client order id, `2` invalid price, `3` invalid quantity |
+| `reason` of `CancelRejected` | `1` unknown order |
+| `reason` of `OrderCancelled` | `1` requested, `2` session closed |
+| `code` of `ProtocolError` | `1` bad length, `2` unknown type, `3` bad field, `4` hello required, `5` bad magic, `6` unsupported version |
+
+Any other value of an enumerated field is a protocol error (`bad field`).
+
+`price` and `quantity` are not range-checked by the protocol layer. An order with an out-of-range price is well-formed; the engine rejects it with `OrderRejected` (section 4.1).
+
+### 7.5 Conversation
+
+1. The client connects and sends `Hello`.
+2. The server answers `HelloAck` with the protocol version and the session's identifier.
+3. The client sends `NewOrder`, `CancelOrder` and `Subscribe` in any order and at any time. The server sends the messages of section 7.3 as events occur.
+4. Either side closes the connection to end the session.
+
+Requests are not answered one by one: the server's messages form a stream, and a client matches them to its requests with `client_order_id` and `order_id`.
+
+### 7.6 Protocol errors
+
+A protocol error means the two sides no longer agree on where messages begin, or one side does not speak the protocol. It cannot be recovered from within the stream.
+
+| Code | Condition |
+|---|---|
+| bad length | `length` exceeds 64 or does not match the message type |
+| unknown type | `type` is not a message this side accepts |
+| bad field | An enumerated field holds an undefined value |
+| hello required | The first message is not `Hello`, or `Hello` is sent twice |
+| bad magic | `Hello.magic` is wrong |
+| unsupported version | `Hello.version` is not supported |
+
+On a protocol error the server sends `ProtocolError` if it can, then closes the connection. Closing the connection closes the session, with the effect described in section 4.3.
+
+A business rejection is different: `OrderRejected` and `CancelRejected` are normal messages, and the session continues.
+
+## 8. Section to be written
 
 | # | Section | Needed before |
 |---|---|---|
-| 6 | Event sequencing, market data, book snapshot | Wire protocol |
-| 7 | Wire protocol (framing, encoding, message tables, versioning, limits) | Codec |
 | 8 | Sessions (connection lifecycle, ownership) | Server |
 
 ## 9. Threading model
@@ -282,6 +415,7 @@ Text, one command per line. Words are separated by spaces or tabs. Empty lines a
 | `new <session_id> <client_order_id> <buy\|sell> <price> <quantity>` | `NewOrder` |
 | `cancel <session_id> <order_id>` | `CancelOrder` |
 | `close <session_id>` | `SessionClosed` |
+| `snapshot <session_id>` | `SnapshotRequest` |
 
 Numbers are decimal integers. The price may be negative or out of range, so that a script can exercise validation; such an order is rejected by the engine, not by the parser.
 
@@ -300,6 +434,9 @@ For each command, the line `> ` followed by the command, then one line per event
 | `CancelRejected` | `cancel_rejected session=S order_id=O reason=R` |
 | `Trade` | `trade price=P quantity=Q aggressor=buy\|sell` |
 | `BookUpdate` | `book side=buy\|sell price=P total=Q` |
+| `SnapshotBegin` | `snapshot_begin session=S` |
+| `SnapshotLevel` | `snapshot_level session=S side=buy\|sell price=P total=Q` |
+| `SnapshotEnd` | `snapshot_end session=S` |
 
 Reasons are written in lower case with underscores: `invalid_client_order_id`, `invalid_price`, `invalid_quantity`, `unknown_order`, `requested`, `session_closed`.
 
@@ -389,6 +526,9 @@ The comparison answers one question: whether the lock-free queue transfers more 
 | D10 | `Price`, `Quantity` and the identifier types are plain integer aliases. Aggregates are built with designated initializers, which static analysis enforces. | A distinct wrapper type for each. | Wrapper types catch swapped arguments at compile time but need operator boilerplate. Naming every field at the construction site covers most of the same risk. |
 | D11 | Latencies are timed with the processor's timestamp counter, calibrated against `steady_clock` and cross-checked after every pass. | `steady_clock` only. | Under WSL2 `steady_clock` advances in steps of 100 ns, which is too coarse for operations of about 500 ns. |
 | D12 | Threads communicate through a lock-free SPSC ring buffer written for this project. | A queue protected by a mutex; an existing library. | Writing it is one of the project's goals. It is kept only because the benchmark shows a gain over the mutex version (docs/BENCHMARKS.md). |
+| D13 | A market data subscription is served by a snapshot command that goes through the engine like an order. | Let the network thread read the book directly; maintain a copy of the book in the network thread. | The book has a single owner, so reading it from another thread would need a lock. Putting the snapshot in the event stream also fixes exactly which updates come before and after it. |
+| D14 | Market data sequence numbers are assigned by the publisher and exist only on the wire. | Sequence fields inside the engine's `Trade` and `BookUpdate` events. | The engine's output stays a function of its commands alone, and replay files do not depend on a numbering that only matters to network clients. |
+| D15 | The wire format is little-endian with a 3-byte header (`length`, `type`) and fixed-size bodies, encoded field by field. | Big-endian "network order"; sending C++ structs; a text protocol. | Every machine this runs on is little-endian. Field-by-field encoding makes the format independent of compiler padding and alignment. Fixed sizes make a malformed length detectable. |
 
 ## 16. Open questions
 
