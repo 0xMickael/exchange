@@ -18,7 +18,7 @@ for preset in debug release asan tsan; do
     echo "== clang++ / $preset"
     CXX=clang++ cmake --preset "$preset" -B "build/clang-$preset" > /dev/null
     cmake --build "build/clang-$preset" > /dev/null
-    ctest --test-dir "build/clang-$preset" --output-on-failure | tail -n 3
+    ctest --test-dir "build/clang-$preset" --output-on-failure --parallel 4 | tail -n 3
 done
 
 echo "== clang-tidy"

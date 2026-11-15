@@ -9,6 +9,7 @@
 #include <sys/time.h>
 
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -69,6 +70,12 @@ public:
             if (received == 0) {
                 return std::nullopt;
             }
+            if (received < 0 && errno == ECONNRESET) {
+                // The server closed the connection while this client still had
+                // data on its way to it. Everything the server sent before has
+                // been read at this point, so this is the end of the stream too.
+                return std::nullopt;
+            }
             if (received < 0) {
                 throw std::runtime_error("TestClient: no message received in time");
             }
@@ -97,6 +104,28 @@ public:
     }
 
     void close() { socket_.reset(); }
+
+    // Shrinks the kernel's receive buffer, so that a client that stops reading
+    // fills it after a few kilobytes instead of megabytes.
+    void set_receive_buffer(int bytes) {
+        ::setsockopt(socket_.get(), SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes));
+    }
+
+    // Reads and discards everything until the server closes the connection.
+    // Returns false if the connection is still open after the receive timeout.
+    bool read_until_closed() {
+        std::array<std::byte, 4096> buffer{};
+        while (true) {
+            const ssize_t received = ::recv(socket_.get(), buffer.data(), buffer.size(), 0);
+            if (received == 0) {
+                return true;
+            }
+            if (received < 0) {
+                // A reset also means the server closed the connection.
+                return errno == ECONNRESET;
+            }
+        }
+    }
 
 private:
     net::FileDescriptor socket_;

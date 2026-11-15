@@ -10,6 +10,7 @@
 #include "exchange/server/publisher.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -34,6 +35,12 @@ struct ServerConfig {
     std::uint16_t port = 9000;
     // A session whose unsent output exceeds this is closed (SPEC section 10.1).
     std::size_t max_output_bytes = std::size_t{1} << 20;
+    // Size requested for the kernel's send buffer of each connection; 0 keeps
+    // the system default. A small buffer makes a slow client show up sooner.
+    int socket_send_buffer_bytes = 0;
+    // When stopping, how long to keep trying to send answers that clients have
+    // not read yet (SPEC section 9.4).
+    std::chrono::milliseconds shutdown_grace{1000};
     ServerMode mode = ServerMode::Pipeline;
     // Used in pipeline mode only.
     PipelineConfig pipeline{};
@@ -121,6 +128,10 @@ private:
     // Sends pending output and closes scheduled connections, until neither is left.
     void finish_iteration();
     void close_scheduled_connections();
+    // Orderly stop: finishes the work already accepted, sends the answers,
+    // then closes every connection.
+    void shut_down();
+    void send_remaining_output();
 
     ServerConfig config_;
     net::FileDescriptor listener_;
@@ -139,6 +150,9 @@ private:
 
     std::vector<SessionId> stalled_;
     std::deque<Command> deferred_commands_;
+    // Pipeline mode: commands handed to the engine thread so far.
+    std::uint64_t commands_submitted_ = 0;
+    bool shutting_down_ = false;
 
     // Inline mode uses engine_; pipeline mode uses pipeline_, which owns its
     // own engine on its own thread.

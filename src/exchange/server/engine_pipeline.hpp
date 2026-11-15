@@ -5,6 +5,7 @@
 #include "exchange/core/matching_engine.hpp"
 #include "exchange/queue/spsc_queue.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <stop_token>
@@ -56,6 +57,13 @@ public:
     }
     [[nodiscard]] bool try_take(Event& event) noexcept { return events_.try_pop(event); }
 
+    // How many commands the engine thread has finished: processed, with all
+    // their events queued. Once this equals the number of commands submitted
+    // and the event queue has been emptied, nothing is left in the pipeline.
+    [[nodiscard]] std::uint64_t processed() const noexcept {
+        return processed_.load(std::memory_order_acquire);
+    }
+
 private:
     void run(const std::stop_token& stop);
     // Queues one event, waiting for room if necessary. Returns false if the
@@ -68,6 +76,9 @@ private:
     EngineWait wait_;
     int notify_fd_;
     MatchingEngine engine_;
+    // Written by the engine thread after each command. On a cache line of its
+    // own, away from what the network thread writes.
+    alignas(64) std::atomic<std::uint64_t> processed_{0};
     std::jthread thread_;
 };
 

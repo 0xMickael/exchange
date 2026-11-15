@@ -73,6 +73,7 @@ void EnginePipeline::run(const std::stop_token& stop) {
     bool events_unannounced = false;
     std::size_t commands_since_notification = 0;
     std::size_t idle_polls = 0;
+    std::uint64_t processed = 0;
 
     while (!stop.stop_requested()) {
         if (!commands_.try_pop(command)) {
@@ -101,6 +102,7 @@ void EnginePipeline::run(const std::stop_token& stop) {
             }
             events_unannounced = true;
         }
+        processed_.store(++processed, std::memory_order_release);
 
         if (events_unannounced && ++commands_since_notification >= commands_per_notification) {
             notify();

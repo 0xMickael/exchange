@@ -461,13 +461,26 @@ Rules:
 
 ### 9.4 Startup and shutdown
 
-The server binds and listens when it is created; failing to do so is a fatal error (section 11). A stop request, from another thread or from a signal handler, writes to an `eventfd` that the event loop watches; the loop then returns and the server closes every connection. Orders resting in the book are lost with the process: there is no persistence (section 1.2).
+The server binds and listens when it is created; failing to do so is a fatal error (section 11).
+
+A stop request, from another thread or from a signal handler, writes to an `eventfd` that the event loop watches. The server then stops in order:
+
+1. It stops accepting connections and reading from sockets. Commands not yet read, or held back by a full command queue, are discarded.
+2. In pipeline mode, it lets the engine thread finish every command already queued, publishing the events as they come, then stops that thread.
+3. It sends the output still waiting for clients. A client that does not read is waited for only during a grace period (1 second by default).
+4. It closes every connection.
+
+So when the server stops, the answers a client receives are a prefix of the answers to what it sent: none is missing in the middle. A client that was still sending may see its connection reset instead of closed cleanly.
+
+Orders resting in the book are lost with the process: there is no persistence (section 1.2).
 
 ## 10. Backpressure and delivery contract
 
 ### 10.1 Slow clients
 
-Each session has an output buffer holding the bytes the kernel has not accepted yet. If it grows beyond a configured limit (1 MiB by default), the server closes the session.
+Each session has an output buffer holding the bytes the kernel has not accepted yet. When it grows beyond a configured limit (1 MiB by default), the server first offers its content to the kernel. If it is still beyond the limit afterwards, the client is not reading fast enough and the server closes the session.
+
+Offering the content to the kernel first matters: a large snapshot is produced in one go and can exceed the limit by itself, although its reader is perfectly able to take it.
 
 This gives the delivery contract for private events: a client either receives every message addressed to it, in order, or its connection is closed. Messages are never dropped individually. A closed session's orders are cancelled (section 8.2), so a client that was cut off knows the state it left: no order of that session is still active.
 
@@ -635,7 +648,11 @@ The comparison answers one question: whether the lock-free queue transfers more 
 | D18 | The command-line client waits for the server's answers after each command, using the cancel of order 0 as a marker. | Print answers whenever they arrive; add a dedicated ping message to the protocol. | It makes scripted sessions produce the same transcript on every run. The marker must pass through the engine to be ordered after the engine's events, which an existing request already does. |
 | D19 | An idle engine thread polls briefly, then sleeps in short naps; spinning forever is an option. | Always spin; block on a condition variable or an `eventfd`. | Spinning forever uses a whole core for a server that is mostly idle. Blocking needs a wake-up protocol whose missed-wake-up cases are subtle; naps cannot miss a wake-up and their cost is measured in the end-to-end benchmark. |
 | D20 | When the command queue is full, the network thread stops reading sockets instead of rejecting orders. | Reject with a "busy" message; block the network thread. | Stopping to read lets TCP slow the senders down with no loss and no new message type. Blocking would allow the two threads to wait for each other. |
+| D21 | The number of active orders is not capped. | A global cap; a cap per session. | Without accounts, neither gives real protection: a global cap lets one client fill the book and block everyone else, and a per-session cap is bypassed by opening more connections. It is listed as a known limitation instead of adding a reject reason that protects nothing. |
 
-## 16. Open questions
+## 16. Known limitations
 
-- Should the engine cap the number of active orders and reject new ones beyond it? A bound keeps memory use predictable; the cost is one more reject reason.
+- **The book is not bounded.** Nothing limits the number of active orders, so memory use grows with the book (decision D21).
+- **No lingering close.** A client that is still sending when the server closes its connection may see a connection reset instead of a clean end of stream.
+- **Running out of file descriptors is not handled.** If the process cannot accept a connection for lack of descriptors, the event loop keeps retrying without pause until one is freed.
+- **A snapshot is paid for by everyone.** It is built on the matching thread, in time proportional to the number of price levels (section 6.4).

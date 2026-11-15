@@ -2,6 +2,7 @@
 
 #include "exchange/net/tcp.hpp"
 #include "exchange/protocol/codec.hpp"
+#include "exchange/queue/cpu_relax.hpp"
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -109,8 +110,66 @@ void Server::run() {
         finish_iteration();
     }
 
+    shut_down();
+}
+
+void Server::shut_down() {
+    shutting_down_ = true;
+    // Nothing more is accepted or read: only what is already in the server
+    // gets finished. Each connection stays registered with epoll, with no
+    // event of interest for now.
+    ::epoll_ctl(epoll_.get(), EPOLL_CTL_DEL, listener_.get(), nullptr);
+    for (auto& [session_id, connection] : connections_) {
+        connection.waiting_for_writable = false;
+        epoll_control(epoll_, EPOLL_CTL_MOD, connection.socket.get(), 0, session_id);
+    }
+    deferred_commands_.clear();
+    stalled_.clear();
+
     if (pipeline_) {
+        // Let the engine thread finish every command it was given, taking its
+        // events as they come so that it never waits for room.
+        while (pipeline_->processed() < commands_submitted_) {
+            drain_engine_events();
+            cpu_relax();
+        }
+        drain_engine_events();
         pipeline_->stop();
+    }
+
+    send_remaining_output();
+    connections_.clear();
+    dirty_.clear();
+    closing_.clear();
+}
+
+void Server::send_remaining_output() {
+    const auto deadline = std::chrono::steady_clock::now() + config_.shutdown_grace;
+    std::array<epoll_event, 64> ready{};
+    while (true) {
+        bool output_left = false;
+        for (auto& [session_id, connection] : connections_) {
+            if (connection.closing || connection.output.empty()) {
+                continue;
+            }
+            flush(connection);
+            output_left = output_left || (!connection.closing && !connection.output.empty());
+        }
+        if (!output_left) {
+            return;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0) {
+            // Clients that still have not read their messages are abandoned.
+            return;
+        }
+        // Sleeps until a socket can take more output, or the grace period ends.
+        const int count = ::epoll_wait(epoll_.get(), ready.data(), static_cast<int>(ready.size()),
+                                       static_cast<int>(remaining.count()));
+        if (count < 0 && errno != EINTR) {
+            return;
+        }
     }
 }
 
@@ -147,6 +206,10 @@ void Server::accept_connections() {
             return;
         }
         net::set_tcp_no_delay(socket);
+        if (config_.socket_send_buffer_bytes > 0) {
+            ::setsockopt(socket.get(), SOL_SOCKET, SO_SNDBUF, &config_.socket_send_buffer_bytes,
+                         sizeof(config_.socket_send_buffer_bytes));
+        }
 
         const SessionId session_id = next_session_id_++;
         epoll_control(epoll_, EPOLL_CTL_ADD, socket.get(), EPOLLIN, session_id);
@@ -249,7 +312,11 @@ bool Server::submit(const Command& command) {
         return true;
     }
     // Commands the server deferred earlier go first.
-    return deferred_commands_.empty() && pipeline_->try_submit(command);
+    if (!deferred_commands_.empty() || !pipeline_->try_submit(command)) {
+        return false;
+    }
+    ++commands_submitted_;
+    return true;
 }
 
 void Server::submit_or_defer(const Command& command) {
@@ -277,6 +344,7 @@ void Server::drain_engine_events() {
 void Server::retry_held_commands() {
     while (!deferred_commands_.empty() && pipeline_->try_submit(deferred_commands_.front())) {
         deferred_commands_.pop_front();
+        ++commands_submitted_;
     }
     if (!deferred_commands_.empty()) {
         return;
@@ -303,10 +371,19 @@ bool Server::send(SessionId session_id, const protocol::ServerMessage& message) 
     protocol::encode(message, connection.output);
 
     if (connection.output.size() > config_.max_output_bytes) {
-        // The client is not reading fast enough. Its messages are never
-        // dropped one by one: the whole session ends instead.
-        schedule_close(connection);
-        return false;
+        // A lot is waiting for this client. That alone proves nothing: a large
+        // snapshot is produced all at once. Offer it to the kernel first.
+        flush(connection);
+        if (connection.closing) {
+            return false;
+        }
+        if (connection.output.size() > config_.max_output_bytes) {
+            // The kernel would not take it either: the client is not reading
+            // fast enough. Its messages are never dropped one by one: the
+            // whole session ends instead (SPEC section 10.1).
+            schedule_close(connection);
+            return false;
+        }
     }
     if (!connection.dirty) {
         connection.dirty = true;
@@ -347,7 +424,9 @@ void Server::watch_writable(Connection& connection, bool enable) {
         return;
     }
     connection.waiting_for_writable = enable;
-    const std::uint32_t events = enable ? (EPOLLIN | EPOLLOUT) : EPOLLIN;
+    // While shutting down, input is no longer read.
+    const std::uint32_t input = shutting_down_ ? 0U : static_cast<std::uint32_t>(EPOLLIN);
+    const std::uint32_t events = enable ? (input | EPOLLOUT) : input;
     epoll_control(epoll_, EPOLL_CTL_MOD, connection.socket.get(), events, connection.session_id);
 }
 

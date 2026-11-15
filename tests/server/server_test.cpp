@@ -5,12 +5,15 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <set>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -511,6 +514,235 @@ TEST_P(ServerTest, ClientsSendingAtTheSameTimeAreAllServed) {
         EXPECT_EQ(count, orders_per_client);
     }
 }
+
+// --- Limits and shutdown: tests that need their own server settings ---
+
+class ServerLimitsTest : public ::testing::TestWithParam<Variant> {
+public:
+    ServerLimitsTest(const ServerLimitsTest&) = delete;
+    ServerLimitsTest& operator=(const ServerLimitsTest&) = delete;
+
+protected:
+    ServerLimitsTest() = default;
+    ~ServerLimitsTest() override { stop(); }
+
+    void start(const ServerConfig& config) {
+        server_ = std::make_unique<Server>(config);
+        thread_ = std::jthread([this] { server_->run(); });
+    }
+
+    // Stops the server and waits until it has finished shutting down.
+    void stop() {
+        if (thread_.joinable()) {
+            server_->request_stop();
+            thread_.join();
+        }
+    }
+
+    [[nodiscard]] TestClient session() const {
+        TestClient client(server_->port());
+        client.hello();
+        return client;
+    }
+
+    // A session that subscribes to market data and then never reads again.
+    [[nodiscard]] TestClient idle_subscriber() const {
+        TestClient client = session();
+        client.set_receive_buffer(4096);
+        client.send(new_order(1, Side::Buy, 50, 1));
+        client.expect<protocol::OrderAccepted>();
+        client.send(protocol::Subscribe{});
+        client.expect<protocol::SnapshotBegin>();
+        client.expect<protocol::SnapshotLevel>();
+        client.expect<protocol::SnapshotEnd>();
+        return client;
+    }
+
+    // Sends a batch of resting sell orders and reads their acknowledgements.
+    // Each order produces one market data update for every subscriber.
+    // Returns true if a market data update for the bid level at `watched_price`
+    // going to zero was seen among the answers.
+    static bool send_batch(TestClient& client, ClientOrderId& next_client_order_id,
+                           Price watched_price) {
+        constexpr int batch_size = 200;
+        std::vector<std::byte> bytes;
+        for (int i = 0; i < batch_size; ++i) {
+            protocol::encode(new_order(next_client_order_id++, Side::Sell, 200, 1), bytes);
+        }
+        client.send_bytes(bytes);
+
+        bool level_removed = false;
+        for (int acknowledged = 0; acknowledged < batch_size;) {
+            const std::optional<protocol::ServerMessage> message = client.receive();
+            if (!message.has_value()) {
+                ADD_FAILURE() << "the active client was disconnected";
+                return false;
+            }
+            if (std::holds_alternative<protocol::OrderAccepted>(*message)) {
+                ++acknowledged;
+            } else if (const auto* update = std::get_if<protocol::BookUpdate>(&*message)) {
+                level_removed = level_removed ||
+                                (update->price == watched_price && update->total_quantity == 0);
+            }
+        }
+        return level_removed;
+    }
+
+    std::unique_ptr<Server> server_;
+    std::jthread thread_;
+};
+
+TEST_P(ServerLimitsTest, LargeSnapshotIsNotMistakenForASlowClient) {
+    ServerConfig config = GetParam().config;
+    config.max_output_bytes = 4096;
+    start(config);
+
+    // 1000 levels make a snapshot of about 20 kB, five times the limit.
+    constexpr Price level_count = 1000;
+    TestClient trader = session();
+    for (Price i = 0; i < level_count; ++i) {
+        trader.send(new_order(static_cast<ClientOrderId>(i + 1), Side::Sell, 1000 + i, 1));
+        trader.expect<protocol::OrderAccepted>();
+    }
+
+    TestClient watcher = session();
+    watcher.send(protocol::Subscribe{});
+
+    watcher.expect<protocol::SnapshotBegin>();
+    for (Price i = 0; i < level_count; ++i) {
+        ASSERT_EQ(watcher.expect<protocol::SnapshotLevel>().price, 1000 + i);
+    }
+    watcher.expect<protocol::SnapshotEnd>();
+}
+
+TEST_P(ServerLimitsTest, ClientThatDoesNotReadIsDisconnectedAndItsOrdersCancelled) {
+    ServerConfig config = GetParam().config;
+    config.max_output_bytes = std::size_t{16} * 1024;
+    config.socket_send_buffer_bytes = 4096;
+    start(config);
+
+    TestClient slow = idle_subscriber(); // Has a buy order resting at 50.
+    TestClient active = session();
+    active.send(protocol::Subscribe{});
+    active.expect<protocol::SnapshotBegin>();
+    active.expect<protocol::SnapshotLevel>();
+    active.expect<protocol::SnapshotEnd>();
+
+    // Market data piles up for the slow client until the server gives up on
+    // it. The active client, which reads, sees the slow client's order go.
+    bool slow_order_cancelled = false;
+    ClientOrderId next_client_order_id = 1;
+    int batches = 0;
+    while (!slow_order_cancelled && batches < 2000) {
+        slow_order_cancelled = send_batch(active, next_client_order_id, 50);
+        ++batches;
+    }
+
+    EXPECT_TRUE(slow_order_cancelled) << "after " << batches << " batches";
+    EXPECT_TRUE(slow.read_until_closed());
+
+    // The active client was never affected.
+    active.send(protocol::CancelOrder{.order_id = 0});
+    bool answered = false;
+    while (!answered) {
+        const std::optional<protocol::ServerMessage> message = active.receive();
+        if (!message.has_value()) {
+            FAIL() << "the active client was disconnected";
+        }
+        answered = std::holds_alternative<protocol::CancelRejected>(*message);
+    }
+}
+
+TEST_P(ServerLimitsTest, StoppingDoesNotLoseAnswersInTheMiddleOfAStream) {
+    start(GetParam().config);
+    constexpr ClientOrderId order_count = 3000;
+    TestClient client = session();
+    std::vector<std::byte> bytes;
+    for (ClientOrderId id = 1; id <= order_count; ++id) {
+        protocol::encode(new_order(id, Side::Buy, 100, 1), bytes);
+    }
+    // The server may close the connection while this thread is still writing.
+    std::jthread writer([&client, &bytes] {
+        try {
+            client.send_bytes(bytes);
+        } catch (const std::runtime_error&) { // NOLINT(bugprone-empty-catch)
+        }
+    });
+
+    // Wait until the server is in the middle of the stream, then stop it.
+    EXPECT_EQ(client.expect<protocol::OrderAccepted>().client_order_id, 1U);
+    server_->request_stop();
+
+    // Whatever the server answered must be the beginning of the stream, with
+    // no answer missing before the last one received.
+    ClientOrderId last = 1;
+    while (true) {
+        const std::optional<protocol::ServerMessage> message = client.receive();
+        if (!message.has_value()) {
+            break;
+        }
+        const auto* accepted = std::get_if<protocol::OrderAccepted>(&*message);
+        ASSERT_NE(accepted, nullptr);
+        ASSERT_EQ(accepted->client_order_id, last + 1);
+        ASSERT_EQ(accepted->order_id, last + 1);
+        last = accepted->client_order_id;
+    }
+    writer.join();
+    EXPECT_GE(last, 1U);
+}
+
+TEST_P(ServerLimitsTest, StoppingWaitsForSlowClientsOnlyDuringTheGracePeriod) {
+    ServerConfig config = GetParam().config;
+    config.max_output_bytes = std::size_t{64} * 1024 * 1024; // Never reached here.
+    config.socket_send_buffer_bytes = 4096;
+    config.shutdown_grace = std::chrono::milliseconds(300);
+    start(config);
+
+    // Kept open, and never read from, until the end of the test.
+    const TestClient slow = idle_subscriber();
+    TestClient active = session();
+    ClientOrderId next_client_order_id = 1;
+    for (int batch = 0; batch < 50; ++batch) {
+        send_batch(active, next_client_order_id, 50);
+    }
+
+    // About 280 kB are waiting for a client that does not read.
+    const auto before = std::chrono::steady_clock::now();
+    stop();
+    const auto elapsed = std::chrono::steady_clock::now() - before;
+
+    EXPECT_GE(elapsed, std::chrono::milliseconds(200)) << "the grace period was not used";
+    EXPECT_LT(elapsed, std::chrono::seconds(10)) << "the server waited for the slow client";
+}
+
+TEST_P(ServerLimitsTest, StoppingSendsWhatClientsHaveNotReadYet) {
+    start(GetParam().config);
+    TestClient client = session();
+    constexpr ClientOrderId order_count = 100;
+    for (ClientOrderId id = 1; id <= order_count; ++id) {
+        client.send(new_order(id, Side::Buy, 100, 1));
+    }
+    // Reading the first answer shows that the server has started on them.
+    client.expect<protocol::OrderAccepted>();
+
+    stop();
+
+    // After the server is gone, the answers it produced are still delivered.
+    ClientOrderId received = 1;
+    while (client.receive().has_value()) {
+        ++received;
+    }
+    EXPECT_GE(received, 1U);
+    EXPECT_LE(received, order_count);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Modes, ServerLimitsTest,
+    ::testing::Values(Variant{.name = "Inline", .config = local_config(ServerMode::Inline)},
+                      Variant{.name = "Pipeline", .config = local_config(ServerMode::Pipeline)},
+                      Variant{.name = "PipelineTinyQueues",
+                              .config = local_config(ServerMode::Pipeline, 2)}),
+    [](const ::testing::TestParamInfo<Variant>& variant) { return variant.param.name; });
 
 INSTANTIATE_TEST_SUITE_P(
     Modes, ServerTest,
