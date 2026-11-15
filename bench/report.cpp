@@ -12,35 +12,14 @@ namespace exchange::bench {
 namespace {
 
 // The median, over all runs, of one statistic of a run.
-double median_of(const EngineBenchmarkResult& result,
+double median_of(const std::vector<EngineRunResult>& runs,
                  const std::function<double(const EngineRunResult&)>& statistic) {
     std::vector<double> values;
-    values.reserve(result.runs.size());
-    for (const EngineRunResult& run : result.runs) {
+    values.reserve(runs.size());
+    for (const EngineRunResult& run : runs) {
         values.push_back(statistic(run));
     }
     return median(std::move(values));
-}
-
-EngineRunResult median_run(const EngineBenchmarkResult& result) {
-    const auto latency = [&](std::uint64_t LatencySummary::* field) {
-        return static_cast<std::uint64_t>(median_of(result, [field](const EngineRunResult& run) {
-            return static_cast<double>(run.latency_ns.*field);
-        }));
-    };
-    EngineRunResult summary;
-    summary.latency_ns.count = result.runs.empty() ? 0 : result.runs.front().latency_ns.count;
-    summary.latency_ns.min = latency(&LatencySummary::min);
-    summary.latency_ns.p50 = latency(&LatencySummary::p50);
-    summary.latency_ns.p95 = latency(&LatencySummary::p95);
-    summary.latency_ns.p99 = latency(&LatencySummary::p99);
-    summary.latency_ns.p999 = latency(&LatencySummary::p999);
-    summary.latency_ns.max = latency(&LatencySummary::max);
-    summary.latency_ns.mean =
-        median_of(result, [](const EngineRunResult& run) { return run.latency_ns.mean; });
-    summary.commands_per_second =
-        median_of(result, [](const EngineRunResult& run) { return run.commands_per_second; });
-    return summary;
 }
 
 double percent_of(std::uint64_t part, std::uint64_t whole) {
@@ -81,6 +60,27 @@ void print_json_run(std::ostream& out, const EngineRunResult& run) {
 }
 
 } // namespace
+
+EngineRunResult median_run(const std::vector<EngineRunResult>& runs) {
+    const auto latency = [&](std::uint64_t LatencySummary::* field) {
+        return static_cast<std::uint64_t>(median_of(runs, [field](const EngineRunResult& run) {
+            return static_cast<double>(run.latency_ns.*field);
+        }));
+    };
+    EngineRunResult summary;
+    summary.latency_ns.count = runs.empty() ? 0 : runs.front().latency_ns.count;
+    summary.latency_ns.min = latency(&LatencySummary::min);
+    summary.latency_ns.p50 = latency(&LatencySummary::p50);
+    summary.latency_ns.p95 = latency(&LatencySummary::p95);
+    summary.latency_ns.p99 = latency(&LatencySummary::p99);
+    summary.latency_ns.p999 = latency(&LatencySummary::p999);
+    summary.latency_ns.max = latency(&LatencySummary::max);
+    summary.latency_ns.mean =
+        median_of(runs, [](const EngineRunResult& run) { return run.latency_ns.mean; });
+    summary.commands_per_second =
+        median_of(runs, [](const EngineRunResult& run) { return run.commands_per_second; });
+    return summary;
+}
 
 void print_engine_report(std::ostream& out, const Environment& environment,
                          const EngineBenchmarkConfig& config, const EngineBenchmarkResult& result) {
@@ -128,7 +128,7 @@ void print_engine_report(std::ostream& out, const Environment& environment,
     for (std::size_t i = 0; i < result.runs.size(); ++i) {
         print_run_row(out, std::to_string(i + 1), result.runs[i]);
     }
-    print_run_row(out, "median", median_run(result));
+    print_run_row(out, "median", median_run(result.runs));
 }
 
 void print_engine_json(std::ostream& out, const Environment& environment,
@@ -181,7 +181,7 @@ void print_engine_json(std::ostream& out, const Environment& environment,
         print_json_run(out, result.runs[i]);
     }
     out << "\n  ],\n  \"median\": ";
-    print_json_run(out, median_run(result));
+    print_json_run(out, median_run(result.runs));
     out << "\n}\n";
 }
 

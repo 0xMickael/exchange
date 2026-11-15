@@ -1,3 +1,4 @@
+#include "e2e_benchmark.hpp"
 #include "engine_benchmark.hpp"
 #include "environment.hpp"
 #include "queue_benchmark.hpp"
@@ -16,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 namespace {
 
@@ -23,6 +25,7 @@ using exchange::bench::EngineBenchmarkConfig;
 
 constexpr std::string_view usage =
     "Usage: exchange-bench engine [OPTIONS]\n"
+    "       exchange-bench e2e [OPTIONS]\n"
     "       exchange-bench queue [OPTIONS]\n"
     "\n"
     "engine: measures the matching engine alone: no networking, no queues, one thread.\n"
@@ -38,6 +41,23 @@ constexpr std::string_view usage =
     "  --warmup-runs N         unmeasured repetitions run first (default 1)\n"
     "  --clock auto|tsc|steady clock used for latencies (default auto: the processor's\n"
     "                          timestamp counter if usable, otherwise steady_clock)\n"
+    "  --json FILE             also write the results to FILE as JSON\n"
+    "\n"
+    "e2e: measures requests sent over TCP to a server started in this process, in\n"
+    "each server mode.\n"
+    "\n"
+    "  --server S              inline, pipeline, pipeline-spin or all (default all)\n"
+    "  --connections N         client connections, one thread each (default 1)\n"
+    "  --requests N            measured requests per connection (default 100000)\n"
+    "  --rate R                requests per second per connection on a fixed schedule;\n"
+    "                          0 sends each request when the previous one is answered\n"
+    "                          (default 0)\n"
+    "  --initial-orders N      resting orders placed before measuring (default 10000)\n"
+    "  --price-levels N        price levels used on each side (default 50)\n"
+    "  --cancel-percent P      share of requests that are cancels (default 40)\n"
+    "  --aggressive-percent P  share of requests that trade immediately (default 10)\n"
+    "  --seed N                seed of the workload (default 42)\n"
+    "  --runs N                repetitions per server (default 3)\n"
     "  --json FILE             also write the results to FILE as JSON\n"
     "\n"
     "queue: compares the lock-free SPSC queue with a mutex-protected queue, sending\n"
@@ -205,6 +225,73 @@ int run_queue(std::span<char*> arguments) {
     return EXIT_SUCCESS;
 }
 
+int run_e2e(std::span<char*> arguments) {
+    using exchange::bench::ServerKind;
+    exchange::bench::E2eConfig config;
+    std::string json_path;
+    std::uint64_t rate = 0;
+
+    const Options options = {
+        {"--server",
+         [&config](std::string_view text) {
+             const std::map<std::string_view, std::vector<ServerKind>> choices = {
+                 {"inline", {ServerKind::Inline}},
+                 {"pipeline", {ServerKind::PipelineBackoff}},
+                 {"pipeline-spin", {ServerKind::PipelineSpin}},
+                 {"all",
+                  {ServerKind::Inline, ServerKind::PipelineBackoff, ServerKind::PipelineSpin}},
+             };
+             const auto choice = choices.find(text);
+             if (choice == choices.end()) {
+                 return false;
+             }
+             config.servers = choice->second;
+             return true;
+         }},
+        {"--connections", number_into(config.connections)},
+        {"--requests", number_into(config.requests)},
+        {"--rate", number_into(rate)},
+        {"--initial-orders", number_into(config.workload.initial_orders)},
+        {"--price-levels", number_into(config.workload.price_levels)},
+        {"--cancel-percent", number_into(config.workload.cancel_percent)},
+        {"--aggressive-percent", number_into(config.workload.aggressive_percent)},
+        {"--seed", number_into(config.workload.seed)},
+        {"--runs", number_into(config.runs)},
+        {"--json", text_into(json_path)},
+    };
+    const std::string option_problem = parse_options(arguments, options);
+    if (!option_problem.empty()) {
+        return fail(option_problem);
+    }
+    config.rate = static_cast<double>(rate);
+    const std::string problem = exchange::bench::validate(config.workload);
+    if (!problem.empty()) {
+        return fail(problem);
+    }
+    if (config.connections == 0 || config.requests == 0 || config.runs == 0) {
+        return fail("connections, requests and runs must be at least 1");
+    }
+
+    const exchange::bench::Environment environment = environment_with_warning();
+
+    const exchange::bench::E2eResult result = exchange::bench::run_e2e_benchmark(config);
+    if (!result.error.empty()) {
+        std::cerr << "error: " << result.error << '\n';
+        return EXIT_FAILURE;
+    }
+
+    exchange::bench::print_e2e_report(std::cout, environment, config, result);
+    if (!json_path.empty()) {
+        std::ofstream json(json_path);
+        if (!json) {
+            std::cerr << "error: cannot write " << json_path << '\n';
+            return EXIT_FAILURE;
+        }
+        exchange::bench::print_e2e_json(json, environment, config, result);
+    }
+    return EXIT_SUCCESS;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -220,6 +307,9 @@ int main(int argc, char** argv) {
     }
     if (command == "engine") {
         return run_engine(arguments.subspan(2));
+    }
+    if (command == "e2e") {
+        return run_e2e(arguments.subspan(2));
     }
     if (command == "queue") {
         return run_queue(arguments.subspan(2));

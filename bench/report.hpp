@@ -4,8 +4,12 @@
 #include "environment.hpp"
 
 #include <iosfwd>
+#include <vector>
 
 namespace exchange::bench {
+
+// A run whose every statistic is the median of that statistic over the given runs.
+[[nodiscard]] EngineRunResult median_run(const std::vector<EngineRunResult>& runs);
 
 // A human-readable report of an engine benchmark.
 void print_engine_report(std::ostream& out, const Environment& environment,

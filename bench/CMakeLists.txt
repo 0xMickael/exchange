@@ -1,6 +1,7 @@
 # The benchmark logic is a library so that the tests can exercise it.
 add_library(exchange_bench_lib STATIC
     clock.cpp
+    e2e_benchmark.cpp
     engine_benchmark.cpp
     environment.cpp
     latency.cpp
@@ -9,7 +10,7 @@ add_library(exchange_bench_lib STATIC
     workload.cpp)
 target_include_directories(exchange_bench_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(exchange_bench_lib
-    PUBLIC exchange_core exchange_queue
+    PUBLIC exchange_core exchange_net exchange_protocol exchange_queue exchange_server
     PRIVATE exchange_warnings)
 
 # Recorded in every report, so that a result states how its binary was built.

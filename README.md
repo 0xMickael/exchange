@@ -1,7 +1,7 @@
 # exchange
 A C++20 limit order matching engine with TCP networking, lock-free queues, and reproducible latency benchmarks.
 
-> **Status: in development.** The matching engine, the binary protocol, the TCP server in both its one-thread and two-thread modes, and the command-line client work and are tested. The end-to-end benchmark is not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
+> **Status: in development.** The matching engine, the binary protocol, the TCP server in both its one-thread and two-thread modes, the command-line client and the benchmarks work and are tested. Profile-guided optimization and a demo script remain to be done. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
 
 ## Repository layout
 
@@ -94,13 +94,16 @@ The script and output formats are described in [docs/SPEC.md](docs/SPEC.md), sec
 
 ## Benchmark
 
-`exchange-bench` has two benchmarks. `engine` measures the matching engine alone and reports the latency distribution and the throughput. `queue` compares the lock-free queue with a mutex-protected one. Build them with the `release` preset:
+`exchange-bench` has three benchmarks. `engine` measures the matching engine alone. `queue` compares the lock-free queue with a mutex-protected one. `e2e` measures requests sent over TCP to a server, in each server mode. Build them with the `release` preset:
 
 ```sh
 cmake --workflow --preset release
 ./build/release/bench/exchange-bench engine
 ./build/release/bench/exchange-bench queue
+./build/release/bench/exchange-bench e2e
 ```
+
+On the reference machine (a laptop under WSL2): about 0.4 µs per command in the engine alone, and about 65 µs per request end to end over loopback TCP.
 
 Measured results, with the machine and method they come from, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 

@@ -612,11 +612,27 @@ Every report states which clock was used, the smallest interval it can measure, 
 
 The comparison answers one question: whether the lock-free queue transfers more messages than the simplest correct alternative when both threads are busy. It says nothing about behavior when a thread sleeps while waiting.
 
-### 13.6 Known limits
+### 13.6 End-to-end benchmark
+
+**Boundary.** The clock starts just before the client hands a request to the kernel and stops when the client has read the message that answers it: `OrderAccepted` for an order, `OrderCancelled` or `CancelRejected` for a cancel. Fills that follow an acceptance are not waited for. The measurement includes the client's and the server's system calls, the loopback TCP path in both directions, decoding, queues, matching and encoding. It is not comparable with the engine benchmark.
+
+**Setup.** The server runs in the benchmark's process, on its own thread or threads, on an ephemeral port. Each client connection has its own thread, which spins on a non-blocking socket and never sleeps, so that the time the operating system takes to wake a sleeping client is not attributed to the server. Client threads and server threads share the same processor.
+
+**Workload.** The mix of section 13.2, decided at run time by each connection: a cancel targets one of that connection's own resting orders, which it tracks from the answers it receives. A cancel can therefore reach the server after its order was filled by another connection; such cancels are rejected and counted in the report.
+
+**Load model.** Two models are available and must not be confused:
+
+- *Closed loop* (default): a connection sends its next request when the previous one is answered. If the server stalls, the client stops sending, so only one request records the stall. This under-reports high percentiles, a bias known as coordinated omission.
+- *Open loop* (`--rate`): request number *i* is due at a fixed time, whatever the answers do, and its latency is counted from that due time. A request kept waiting behind a stall is charged for its waiting time.
+
+**Procedure.** For each server configuration and each run: start a new server, let every connection place its share of the initial orders, start all connections together, and measure. The summary line is the median of each statistic across runs.
+
+### 13.7 Known limits
 
 - Measurements taken under WSL2 run in a virtual machine. They are labeled as such and are indicative, especially the high percentiles and the maximum.
 - The benchmark does not pin its thread to a core, isolate cores, or control processor frequency scaling.
 - The maximum latency mostly reflects interruptions by the operating system, not the engine.
+- The end-to-end benchmark uses the loopback interface: there is no network card, no cable and no other machine. Client and server compete for the same processor cores.
 
 ## 14. Section to be written
 
@@ -649,6 +665,7 @@ The comparison answers one question: whether the lock-free queue transfers more 
 | D19 | An idle engine thread polls briefly, then sleeps in short naps; spinning forever is an option. | Always spin; block on a condition variable or an `eventfd`. | Spinning forever uses a whole core for a server that is mostly idle. Blocking needs a wake-up protocol whose missed-wake-up cases are subtle; naps cannot miss a wake-up and their cost is measured in the end-to-end benchmark. |
 | D20 | When the command queue is full, the network thread stops reading sockets instead of rejecting orders. | Reject with a "busy" message; block the network thread. | Stopping to read lets TCP slow the senders down with no loss and no new message type. Blocking would allow the two threads to wait for each other. |
 | D21 | The number of active orders is not capped. | A global cap; a cap per session. | Without accounts, neither gives real protection: a global cap lets one client fill the book and block everyone else, and a per-session cap is bypassed by opening more connections. It is listed as a known limitation instead of adding a reject reason that protects nothing. |
+| D22 | Pipeline mode stays the default although inline mode is faster in the end-to-end benchmark on the reference machine. | Make inline the default. | The measurements show that the network path, not matching, dominates a request, so a second thread has nothing to relieve. The pipeline is nonetheless the architecture this project is about; the result is documented instead of hidden, and both modes remain one option away. |
 
 ## 16. Known limitations
 

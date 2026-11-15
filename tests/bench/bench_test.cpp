@@ -1,3 +1,4 @@
+#include "e2e_benchmark.hpp"
 #include "engine_benchmark.hpp"
 #include "environment.hpp"
 #include "latency.hpp"
@@ -266,6 +267,69 @@ TEST(MutexQueue, BehavesLikeABoundedFifo) {
     EXPECT_TRUE(queue.try_pop(value));
     EXPECT_EQ(value, 3);
     EXPECT_FALSE(queue.try_pop(value));
+}
+
+// --- End-to-end benchmark ---
+
+E2eConfig small_e2e() {
+    E2eConfig config;
+    config.workload.initial_orders = 100;
+    config.connections = 2;
+    config.requests = 300;
+    config.runs = 1;
+    // The portable clock, so that the test does not depend on the machine's TSC.
+    config.clock = ClockChoice::Steady;
+    return config;
+}
+
+TEST(E2eBenchmark, ClosedLoopMeasuresEveryRequestOnEveryServer) {
+    const E2eConfig config = small_e2e();
+
+    const E2eResult result = run_e2e_benchmark(config);
+
+    EXPECT_EQ(result.error, "");
+    ASSERT_EQ(result.servers.size(), 3U);
+    for (const E2eServerResult& server : result.servers) {
+        ASSERT_EQ(server.runs.size(), 1U) << to_string(server.kind);
+        EXPECT_EQ(server.runs[0].latency_ns.count, 600U) << to_string(server.kind);
+        EXPECT_GT(server.runs[0].latency_ns.p50, 0U);
+        EXPECT_GT(server.runs[0].commands_per_second, 0.0);
+    }
+}
+
+TEST(E2eBenchmark, OpenLoopKeepsToItsSchedule) {
+    E2eConfig config = small_e2e();
+    config.servers = {ServerKind::PipelineBackoff};
+    config.connections = 1;
+    config.requests = 400;
+    config.rate = 2000.0; // 400 requests at 2000 per second take 0.2 s.
+
+    const E2eResult result = run_e2e_benchmark(config);
+
+    EXPECT_EQ(result.error, "");
+    ASSERT_EQ(result.servers.size(), 1U);
+    EXPECT_EQ(result.servers[0].runs[0].latency_ns.count, 400U);
+    // The measured rate cannot exceed the scheduled one.
+    EXPECT_LE(result.servers[0].runs[0].commands_per_second, 2000.0 * 1.05);
+}
+
+TEST(E2eBenchmark, ReportsContainEveryServer) {
+    E2eConfig config = small_e2e();
+    config.connections = 1;
+    const E2eResult result = run_e2e_benchmark(config);
+    const Environment environment = detect_environment();
+
+    std::ostringstream text;
+    print_e2e_report(text, environment, config, result);
+    std::ostringstream json;
+    print_e2e_json(json, environment, config, result);
+
+    for (const std::string name : {"inline", "pipeline (backoff)", "pipeline (spin)"}) {
+        EXPECT_NE(text.str().find(name), std::string::npos) << name;
+        EXPECT_NE(json.str().find("\"server\": \"" + name + "\""), std::string::npos) << name;
+    }
+    EXPECT_NE(text.str().find("closed loop"), std::string::npos);
+    EXPECT_NE(json.str().find("\"loop\": \"closed\""), std::string::npos);
 }
 
 TEST(Environment, IsDetected) {
