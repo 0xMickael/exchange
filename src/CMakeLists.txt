@@ -15,3 +15,10 @@ add_library(exchange_protocol STATIC
 target_link_libraries(exchange_protocol
     PUBLIC exchange_core
     PRIVATE exchange_warnings)
+
+add_library(exchange_server STATIC
+    exchange/net/tcp.cpp
+    exchange/server/server.cpp)
+target_link_libraries(exchange_server
+    PUBLIC exchange_core exchange_protocol
+    PRIVATE exchange_warnings)

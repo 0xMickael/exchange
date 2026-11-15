@@ -20,6 +20,8 @@ add_executable(exchange_tests
     core/text_test.cpp
     protocol/codec_test.cpp
     queue/spsc_queue_test.cpp
+    server/publisher_test.cpp
+    server/server_test.cpp
     support/reference_engine.cpp)
 target_compile_definitions(exchange_tests PRIVATE
     EXCHANGE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
@@ -29,6 +31,7 @@ target_link_libraries(exchange_tests PRIVATE
     exchange_core
     exchange_protocol
     exchange_queue
+    exchange_server
     exchange_warnings
     GTest::gtest_main)
 

@@ -358,15 +358,32 @@ On a protocol error the server sends `ProtocolError` if it can, then closes the 
 
 A business rejection is different: `OrderRejected` and `CancelRejected` are normal messages, and the session continues.
 
-## 8. Section to be written
+## 8. Sessions
 
-| # | Section | Needed before |
-|---|---|---|
-| 8 | Sessions (connection lifecycle, ownership) | Server |
+A session is one client connection, from the moment the server accepts it until it is closed.
+
+### 8.1 Lifecycle
+
+1. The server accepts the connection and assigns the next `SessionId`. Identifiers start at 1 and are never reused while the server runs.
+2. The client sends `Hello`; the server answers `HelloAck`. Until then, any other message is a protocol error.
+3. The session is active: the client sends orders, cancels and subscriptions.
+4. The session closes.
+
+The server identifies a connection by its `SessionId`, never by its file descriptor: the operating system reuses a descriptor number as soon as a socket is closed, so an event still in transit for an old connection could otherwise reach a new one.
+
+### 8.2 Closing
+
+A session closes when:
+
+- the client closes the connection, or the network reports an error;
+- the client causes a protocol error (section 7.6);
+- the client does not read fast enough (section 10.1).
+
+When a session that completed the handshake closes, the server discards its unsent output, removes it from market data subscribers, and submits `SessionClosed` to the engine, which cancels its orders (section 4.3). A connection that never completed the handshake has no state in the engine, so nothing is submitted.
+
+A client that reconnects gets a new session. It cannot reach the orders of its previous session, which were cancelled.
 
 ## 9. Threading model
-
-Sections 9.2 and later (thread ownership, wake-ups, startup and shutdown) are written with the server.
 
 ### 9.1 Bounded SPSC queue
 
@@ -395,12 +412,57 @@ Threads exchange messages through `SpscQueue<T>`, a bounded ring buffer for exac
 
 **Validation.** Single-thread tests cover the boundaries (empty, full, wrap-around). Two-thread tests transfer a known sequence and check order and integrity, and run under ThreadSanitizer in CI. Weakening the `release`/`acquire` pair on `tail` to `relaxed` still passes the functional test on x86-64 but is reported by ThreadSanitizer as a data race: the functional test alone cannot validate the memory orderings.
 
-## 10–11. Sections to be written
+### 9.2 Execution modes
 
-| # | Section | Needed before |
+The server is built in two modes (decision D5).
+
+**Inline mode.** One thread does everything: it runs the event loop, decodes messages, calls the matching engine directly, and writes the answers. There is no queue and no shared state. This is the mode currently implemented.
+
+**Pipeline mode.** A network thread and a matching thread connected by two SPSC queues. To be specified with its implementation.
+
+### 9.3 Event loop
+
+The network side is a single-threaded event loop on Linux `epoll`:
+
+1. Ask the kernel which sockets are ready (`epoll_wait`). This is the only place where the thread sleeps.
+2. For each ready socket: accept new connections, or read what has arrived and process every complete message, or continue a pending write.
+3. Send the output produced during this iteration, then close the sessions that must be closed.
+
+Rules:
+
+- Every socket is non-blocking. A read returns what has already arrived; a write sends what the kernel accepts and the rest stays in the session's output buffer until the socket is writable again.
+- `epoll` is used level-triggered: a socket is reported as long as it has data to read. One read is done per report, so that one busy client cannot keep the loop away from the others.
+- Messages produced for a session during one iteration are sent with one write.
+- Closing a session is deferred to the end of the iteration, because the code that detects the reason is often still working with that session.
+- Nagle's algorithm is disabled on every connection (`TCP_NODELAY`).
+
+### 9.4 Startup and shutdown
+
+The server binds and listens when it is created; failing to do so is a fatal error (section 11). A stop request, from another thread or from a signal handler, writes to an `eventfd` that the event loop watches; the loop then returns and the server closes every connection. Orders resting in the book are lost with the process: there is no persistence (section 1.2).
+
+## 10. Backpressure and delivery contract
+
+Sections on the queues between threads are written with the pipeline mode.
+
+### 10.1 Slow clients
+
+Each session has an output buffer holding the bytes the kernel has not accepted yet. If it grows beyond a configured limit (1 MiB by default), the server closes the session.
+
+This gives the delivery contract for private events: a client either receives every message addressed to it, in order, or its connection is closed. Messages are never dropped individually. A closed session's orders are cancelled (section 8.2), so a client that was cut off knows the state it left: no order of that session is still active.
+
+The same rule applies to market data (decision D2): a subscriber that cannot keep up is disconnected, and gets a fresh snapshot when it connects and subscribes again.
+
+## 11. Error handling
+
+| Kind | Example | Effect |
 |---|---|---|
-| 10 | Backpressure and delivery contract | Engine thread |
-| 11 | Error handling (business reject, protocol error, fatal error) | Server |
+| Business rejection | Invalid price; cancel of an unknown order | `OrderRejected` or `CancelRejected`. The session continues. |
+| Protocol error | Unknown message type; first message is not `Hello` | `ProtocolError` if possible, then the session is closed (sections 7.6 and 8.2). |
+| Connection failure | Reset by peer; client too slow | The session is closed (section 8.2). Other sessions are not affected. |
+| Fatal error | Cannot bind the listening port; `epoll` fails | The server reports the error and exits with a non-zero status. |
+| Broken invariant | A state the code assumes impossible | Assertion failure in debug builds. Never used for conditions a client can cause. |
+
+No input from a client can make the server exit or affect another session, other than through the market itself.
 
 ## 12. Replay format
 
@@ -529,6 +591,7 @@ The comparison answers one question: whether the lock-free queue transfers more 
 | D13 | A market data subscription is served by a snapshot command that goes through the engine like an order. | Let the network thread read the book directly; maintain a copy of the book in the network thread. | The book has a single owner, so reading it from another thread would need a lock. Putting the snapshot in the event stream also fixes exactly which updates come before and after it. |
 | D14 | Market data sequence numbers are assigned by the publisher and exist only on the wire. | Sequence fields inside the engine's `Trade` and `BookUpdate` events. | The engine's output stays a function of its commands alone, and replay files do not depend on a numbering that only matters to network clients. |
 | D15 | The wire format is little-endian with a 3-byte header (`length`, `type`) and fixed-size bodies, encoded field by field. | Big-endian "network order"; sending C++ structs; a text protocol. | Every machine this runs on is little-endian. Field-by-field encoding makes the format independent of compiler padding and alignment. Fixed sizes make a malformed length detectable. |
+| D16 | The network side is one thread using level-triggered `epoll` on non-blocking sockets. | One thread per connection; edge-triggered `epoll`; `io_uring`. | A thread per connection would need locks around everything shared. Edge-triggered mode reports readiness only once, so a missed read stalls a connection silently; level-triggered mode cannot lose a readiness report. |
 
 ## 16. Open questions
 

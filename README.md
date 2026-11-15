@@ -1,7 +1,7 @@
 # exchange
 A C++20 limit order matching engine with TCP networking, lock-free queues, and reproducible latency benchmarks.
 
-> **Status: in development.** The matching engine is implemented and tested as a library, with a replay tool and benchmarks, the lock-free queue that will connect the server threads, and the binary protocol codec. The TCP server and the command-line client are not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
+> **Status: in development.** The matching engine, the binary protocol and a single-threaded TCP server work and are tested. The command-line client, the two-thread server and the end-to-end benchmark are not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
 
 ## Repository layout
 
@@ -10,6 +10,9 @@ A C++20 limit order matching engine with TCP networking, lock-free queues, and r
 | `src/exchange/core/` | Order book and matching engine: a library with no I/O |
 | `src/exchange/queue/` | Lock-free single-producer single-consumer queue |
 | `src/exchange/protocol/` | Binary wire protocol: message definitions, encoder and decoder |
+| `src/exchange/net/` | Small wrappers over Linux sockets |
+| `src/exchange/server/` | TCP server: event loop, sessions, routing of events to clients |
+| `apps/server/` | `exchange-server` |
 | `apps/replay/` | `exchange-replay`, which runs a command script through the engine |
 | `bench/` | `exchange-bench`, the benchmark tool |
 | `tests/` | Unit tests, replay scenarios, and a randomized comparison against a reference engine |
@@ -36,6 +39,14 @@ This configures, builds and runs the tests in `build/debug`. The available prese
 | `tsan` | ThreadSanitizer |
 
 To use a specific compiler, set `CXX` before the first configure of a preset, for example `CXX=clang++ cmake --workflow --preset debug`.
+
+## Running the server
+
+```sh
+./build/debug/apps/exchange-server --port 9000
+```
+
+The server listens on `127.0.0.1` by default and runs until interrupted with Ctrl-C. It speaks the binary protocol of [docs/SPEC.md](docs/SPEC.md), section 7. The command-line client is not written yet; for now the server is exercised by the integration tests in `tests/server/`.
 
 ## Replaying a command script
 
