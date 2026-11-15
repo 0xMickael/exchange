@@ -1,0 +1,22 @@
+> new 1 1 sell 101 5
+accepted session=1 client_order_id=1 order_id=1
+book side=sell price=101 total=5
+> new 2 1 sell 101 3
+accepted session=2 client_order_id=1 order_id=2
+book side=sell price=101 total=8
+> new 1 2 sell 102 10
+accepted session=1 client_order_id=2 order_id=3
+book side=sell price=102 total=10
+> new 3 1 buy 102 12
+accepted session=3 client_order_id=1 order_id=4
+fill session=1 order_id=1 price=101 quantity=5 remaining=0
+fill session=3 order_id=4 price=101 quantity=5 remaining=7
+trade price=101 quantity=5 aggressor=buy
+fill session=2 order_id=2 price=101 quantity=3 remaining=0
+fill session=3 order_id=4 price=101 quantity=3 remaining=4
+trade price=101 quantity=3 aggressor=buy
+book side=sell price=101 total=0
+fill session=1 order_id=3 price=102 quantity=4 remaining=6
+fill session=3 order_id=4 price=102 quantity=4 remaining=0
+trade price=102 quantity=4 aggressor=buy
+book side=sell price=102 total=6

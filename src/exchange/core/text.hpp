@@ -4,7 +4,9 @@
 #include "exchange/core/event.hpp"
 #include "exchange/core/types.hpp"
 
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace exchange {
 
@@ -18,5 +20,10 @@ namespace exchange {
 [[nodiscard]] std::string to_string(Side side);
 [[nodiscard]] std::string to_string(const Command& command);
 [[nodiscard]] std::string to_string(const Event& event);
+
+// Parses the text form of a command, as produced by to_string(const Command&).
+// Words may be separated by any number of spaces or tabs. Returns nullopt if
+// the line is not a well-formed command.
+[[nodiscard]] std::optional<Command> parse_command(std::string_view line);
 
 } // namespace exchange

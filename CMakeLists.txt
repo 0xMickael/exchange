@@ -38,6 +38,7 @@ target_compile_options(exchange_warnings INTERFACE
     $<$<BOOL:${EXCHANGE_WARNINGS_AS_ERRORS}>:-Werror>)
 
 add_subdirectory(src)
+add_subdirectory(apps)
 
 include(CTest)
 if(BUILD_TESTING)

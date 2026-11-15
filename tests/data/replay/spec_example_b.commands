@@ -1,0 +1,5 @@
+# SPEC section 5.4, example B: the remainder rests, then is cancelled.
+new 1 1 sell 101 5
+new 3 1 buy 101 8
+cancel 3 2
+cancel 3 2

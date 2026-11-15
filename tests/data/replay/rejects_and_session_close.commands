@@ -1,0 +1,11 @@
+# Validation failures, a cancel of another session's order, then a session close.
+new 1 1 buy 100 10
+new 1 1 buy 100 10
+new 1 2 buy 0 10
+new 1 3 buy 100 0
+new 2 1 sell 105 4
+new 1 4 sell 106 2
+
+cancel 2 1
+close 1
+close 1

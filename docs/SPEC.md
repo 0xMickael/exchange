@@ -1,7 +1,7 @@
 # Exchange — Technical Specification
 
 **Status: in progress.** Sections 1–5 (the matching core) were approved on 2026-11-15.
-Sections 6–14 are outlined only; each will be written and approved before the implementation step that depends on it.
+The remaining sections are outlined only; each is written before the implementation step that depends on it.
 
 This document defines behavior and contracts. It does not describe C++ class layouts; those are implementation details constrained by the contracts below.
 
@@ -223,7 +223,7 @@ These hold after every command. A test-only checker verifies them.
 - **I6.** Each session's order set contains exactly that session's active orders.
 - **I7.** Every `Trade` is preceded by exactly two `Fill` events with the same price and quantity.
 
-## 6–14. Sections to be written
+## 6–11. Sections to be written
 
 | # | Section | Needed before |
 |---|---|---|
@@ -233,9 +233,47 @@ These hold after every command. A test-only checker verifies them.
 | 9 | Threading model (ownership, queues, wake-ups, startup, shutdown) | Engine thread |
 | 10 | Backpressure and delivery contract | Engine thread |
 | 11 | Error handling (business reject, protocol error, fatal error) | Server |
-| 12 | Replay format | Replay tool |
+
+## 12. Replay format
+
+`exchange-replay` feeds a command script to a new engine and prints the resulting events. Because the engine is deterministic (section 5.5), the same script always produces the same output, byte for byte.
+
+### 12.1 Input
+
+Text, one command per line. Words are separated by spaces or tabs. Empty lines and lines whose first non-blank character is `#` are ignored.
+
+| Line | Command |
+|---|---|
+| `new <session_id> <client_order_id> <buy\|sell> <price> <quantity>` | `NewOrder` |
+| `cancel <session_id> <order_id>` | `CancelOrder` |
+| `close <session_id>` | `SessionClosed` |
+
+Numbers are decimal integers. The price may be negative or out of range, so that a script can exercise validation; such an order is rejected by the engine, not by the parser.
+
+A line that is not a well-formed command stops the replay. The tool reports its line number and exits with a non-zero status.
+
+### 12.2 Output
+
+For each command, the line `> ` followed by the command, then one line per event in the order of section 5.3.
+
+| Event | Line |
+|---|---|
+| `OrderAccepted` | `accepted session=S client_order_id=C order_id=O` |
+| `OrderRejected` | `rejected session=S client_order_id=C reason=R` |
+| `Fill` | `fill session=S order_id=O price=P quantity=Q remaining=Q` |
+| `OrderCancelled` | `cancelled session=S order_id=O quantity=Q reason=R` |
+| `CancelRejected` | `cancel_rejected session=S order_id=O reason=R` |
+| `Trade` | `trade price=P quantity=Q aggressor=buy\|sell` |
+| `BookUpdate` | `book side=buy\|sell price=P total=Q` |
+
+Reasons are written in lower case with underscores: `invalid_client_order_id`, `invalid_price`, `invalid_quantity`, `unknown_order`, `requested`, `session_closed`.
+
+## 13–14. Sections to be written
+
+| # | Section | Needed before |
+|---|---|---|
 | 13 | Benchmark methodology | Engine benchmark |
-| 14 | Testing strategy and acceptance criteria | Build skeleton |
+| 14 | Testing strategy and acceptance criteria | First release |
 
 ## 15. Decision log
 

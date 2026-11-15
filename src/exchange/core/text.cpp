@@ -1,6 +1,13 @@
 #include "exchange/core/text.hpp"
 
+#include <algorithm>
+#include <charconv>
+#include <cstddef>
+#include <optional>
+#include <string_view>
+#include <system_error>
 #include <variant>
+#include <vector>
 
 namespace exchange {
 
@@ -98,6 +105,74 @@ std::string to_string(const Command& command) {
 
 std::string to_string(const Event& event) {
     return std::visit(EventFormatter{}, event);
+}
+
+namespace {
+
+std::vector<std::string_view> split_words(std::string_view line) {
+    std::vector<std::string_view> words;
+    std::size_t position = 0;
+    while (position < line.size()) {
+        const std::size_t start = line.find_first_not_of(" \t", position);
+        if (start == std::string_view::npos) {
+            break;
+        }
+        const std::size_t end = std::min(line.find_first_of(" \t", start), line.size());
+        words.push_back(line.substr(start, end - start));
+        position = end;
+    }
+    return words;
+}
+
+// Parses a whole word as a decimal integer of type T. Rejects trailing
+// characters and values that do not fit in T.
+template <typename T> bool parse_number(std::string_view word, T& value) {
+    const char* const begin = word.data();
+    const char* const end = begin + word.size();
+    const auto [parsed_end, error] = std::from_chars(begin, end, value);
+    return error == std::errc{} && parsed_end == end;
+}
+
+bool parse_side(std::string_view word, Side& side) {
+    if (word == "buy") {
+        side = Side::Buy;
+        return true;
+    }
+    if (word == "sell") {
+        side = Side::Sell;
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+std::optional<Command> parse_command(std::string_view line) {
+    const std::vector<std::string_view> words = split_words(line);
+    if (words.empty()) {
+        return std::nullopt;
+    }
+
+    if (words[0] == "new" && words.size() == 6) {
+        NewOrder command{};
+        if (parse_number(words[1], command.session_id) &&
+            parse_number(words[2], command.client_order_id) && parse_side(words[3], command.side) &&
+            parse_number(words[4], command.price) && parse_number(words[5], command.quantity)) {
+            return command;
+        }
+    } else if (words[0] == "cancel" && words.size() == 3) {
+        CancelOrder command{};
+        if (parse_number(words[1], command.session_id) &&
+            parse_number(words[2], command.order_id)) {
+            return command;
+        }
+    } else if (words[0] == "close" && words.size() == 2) {
+        SessionClosed command{};
+        if (parse_number(words[1], command.session_id)) {
+            return command;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace exchange

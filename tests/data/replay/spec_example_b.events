@@ -1,0 +1,15 @@
+> new 1 1 sell 101 5
+accepted session=1 client_order_id=1 order_id=1
+book side=sell price=101 total=5
+> new 3 1 buy 101 8
+accepted session=3 client_order_id=1 order_id=2
+fill session=1 order_id=1 price=101 quantity=5 remaining=0
+fill session=3 order_id=2 price=101 quantity=5 remaining=3
+trade price=101 quantity=5 aggressor=buy
+book side=sell price=101 total=0
+book side=buy price=101 total=3
+> cancel 3 2
+cancelled session=3 order_id=2 quantity=3 reason=requested
+book side=buy price=101 total=0
+> cancel 3 2
+cancel_rejected session=3 order_id=2 reason=unknown_order
