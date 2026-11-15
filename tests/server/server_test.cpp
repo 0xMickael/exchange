@@ -4,11 +4,14 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <ostream>
 #include <set>
 #include <span>
+#include <string>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -35,13 +38,36 @@ std::vector<std::byte> bytes_of(std::initializer_list<unsigned> values) {
     return bytes;
 }
 
-class ServerTest : public ::testing::Test {
+// The server configurations every test runs against. The last one has queues
+// so small that they are full almost all the time, which exercises every
+// backpressure path with the ordinary tests.
+struct Variant {
+    std::string name;
+    ServerConfig config;
+};
+
+void PrintTo(const Variant& variant, std::ostream* os) { // NOLINT(readability-identifier-naming)
+    *os << variant.name;
+}
+
+ServerConfig local_config(ServerMode mode, std::size_t queue_capacity = 0) {
+    ServerConfig config;
+    config.port = 0;
+    config.mode = mode;
+    if (queue_capacity != 0) {
+        config.pipeline.command_queue_capacity = queue_capacity;
+        config.pipeline.event_queue_capacity = queue_capacity;
+    }
+    return config;
+}
+
+class ServerTest : public ::testing::TestWithParam<Variant> {
 public:
     ServerTest(const ServerTest&) = delete;
     ServerTest& operator=(const ServerTest&) = delete;
 
 protected:
-    ServerTest() : server_(ServerConfig{.port = 0}), thread_([this] { server_.run(); }) {}
+    ServerTest() : server_(GetParam().config), thread_([this] { server_.run(); }) {}
     ~ServerTest() override { server_.request_stop(); }
 
     [[nodiscard]] TestClient connect() const { return TestClient(server_.port()); }
@@ -73,7 +99,7 @@ protected:
 
 // --- Handshake (section 7.5) ---
 
-TEST_F(ServerTest, HandshakeGivesEachConnectionItsOwnSession) {
+TEST_P(ServerTest, HandshakeGivesEachConnectionItsOwnSession) {
     TestClient first = connect();
     TestClient second = connect();
 
@@ -88,7 +114,7 @@ TEST_F(ServerTest, HandshakeGivesEachConnectionItsOwnSession) {
 
 // --- Orders ---
 
-TEST_F(ServerTest, OrderIsAcknowledged) {
+TEST_P(ServerTest, OrderIsAcknowledged) {
     TestClient client = session();
 
     client.send(new_order(1, Side::Buy, 100, 10));
@@ -98,7 +124,7 @@ TEST_F(ServerTest, OrderIsAcknowledged) {
     expect_nothing_pending(client);
 }
 
-TEST_F(ServerTest, RejectedOrderDoesNotEndTheSession) {
+TEST_P(ServerTest, RejectedOrderDoesNotEndTheSession) {
     TestClient client = session();
 
     client.send(new_order(1, Side::Buy, 0, 10));
@@ -110,7 +136,7 @@ TEST_F(ServerTest, RejectedOrderDoesNotEndTheSession) {
     EXPECT_EQ(client.expect<protocol::OrderAccepted>().client_order_id, 2U);
 }
 
-TEST_F(ServerTest, TwoClientsTradeWithEachOther) {
+TEST_P(ServerTest, TwoClientsTradeWithEachOther) {
     TestClient seller = session();
     TestClient buyer = session();
 
@@ -131,7 +157,7 @@ TEST_F(ServerTest, TwoClientsTradeWithEachOther) {
     expect_nothing_pending(buyer);
 }
 
-TEST_F(ServerTest, ClientCancelsItsOwnOrder) {
+TEST_P(ServerTest, ClientCancelsItsOwnOrder) {
     TestClient client = session();
     client.send(new_order(1, Side::Buy, 100, 10));
     const OrderId order_id = client.expect<protocol::OrderAccepted>().order_id;
@@ -144,7 +170,7 @@ TEST_F(ServerTest, ClientCancelsItsOwnOrder) {
                                         .reason = CancelReason::Requested}));
 }
 
-TEST_F(ServerTest, ClientCannotCancelAnotherClientsOrder) {
+TEST_P(ServerTest, ClientCannotCancelAnotherClientsOrder) {
     TestClient owner = session();
     TestClient other = session();
     owner.send(new_order(1, Side::Buy, 100, 10));
@@ -160,7 +186,7 @@ TEST_F(ServerTest, ClientCannotCancelAnotherClientsOrder) {
 
 // --- Market data (section 6) ---
 
-TEST_F(ServerTest, SubscriptionDeliversASnapshotThenNumberedUpdates) {
+TEST_P(ServerTest, SubscriptionDeliversASnapshotThenNumberedUpdates) {
     TestClient trader = session();
     TestClient watcher = session();
     trader.send(new_order(1, Side::Buy, 100, 3));
@@ -197,7 +223,7 @@ TEST_F(ServerTest, SubscriptionDeliversASnapshotThenNumberedUpdates) {
     expect_nothing_pending(watcher);
 }
 
-TEST_F(ServerTest, SubscriberReceivesPrivateAndPublicEventsInEngineOrder) {
+TEST_P(ServerTest, SubscriberReceivesPrivateAndPublicEventsInEngineOrder) {
     TestClient client = session();
     client.send(protocol::Subscribe{});
     EXPECT_EQ(client.expect<protocol::SnapshotBegin>().last_sequence, 0U);
@@ -209,7 +235,7 @@ TEST_F(ServerTest, SubscriberReceivesPrivateAndPublicEventsInEngineOrder) {
     EXPECT_EQ(client.expect<protocol::BookUpdate>().sequence, 1U);
 }
 
-TEST_F(ServerTest, SubscribingAgainDeliversANewSnapshot) {
+TEST_P(ServerTest, SubscribingAgainDeliversANewSnapshot) {
     TestClient client = session();
     client.send(protocol::Subscribe{});
     client.expect<protocol::SnapshotBegin>();
@@ -227,7 +253,7 @@ TEST_F(ServerTest, SubscribingAgainDeliversANewSnapshot) {
 
 // --- Disconnection (sections 4.3 and 8) ---
 
-TEST_F(ServerTest, DisconnectingCancelsTheClientsOrders) {
+TEST_P(ServerTest, DisconnectingCancelsTheClientsOrders) {
     TestClient leaving = session();
     TestClient watcher = session();
     leaving.send(new_order(1, Side::Buy, 100, 3));
@@ -244,7 +270,7 @@ TEST_F(ServerTest, DisconnectingCancelsTheClientsOrders) {
                   .sequence = 2, .side = Side::Buy, .price = 100, .total_quantity = 0}));
 }
 
-TEST_F(ServerTest, ClientLeavingInTheMiddleOfAMessageDoesNotDisturbOthers) {
+TEST_P(ServerTest, ClientLeavingInTheMiddleOfAMessageDoesNotDisturbOthers) {
     TestClient leaving = session();
     std::vector<std::byte> order;
     protocol::encode(new_order(1, Side::Buy, 100, 3), order);
@@ -260,7 +286,7 @@ TEST_F(ServerTest, ClientLeavingInTheMiddleOfAMessageDoesNotDisturbOthers) {
 
 // --- Framing over TCP (section 7.1) ---
 
-TEST_F(ServerTest, MessageArrivingOneByteAtATimeIsReassembled) {
+TEST_P(ServerTest, MessageArrivingOneByteAtATimeIsReassembled) {
     TestClient client = connect();
     std::vector<std::byte> bytes;
     protocol::encode(protocol::Hello{.magic = protocol::magic, .version = protocol::version},
@@ -275,7 +301,7 @@ TEST_F(ServerTest, MessageArrivingOneByteAtATimeIsReassembled) {
     EXPECT_EQ(client.expect<protocol::OrderAccepted>().client_order_id, 1U);
 }
 
-TEST_F(ServerTest, SeveralMessagesInOneWriteAreAllProcessedInOrder) {
+TEST_P(ServerTest, SeveralMessagesInOneWriteAreAllProcessedInOrder) {
     TestClient client = connect();
     std::vector<std::byte> bytes;
     protocol::encode(protocol::Hello{.magic = protocol::magic, .version = protocol::version},
@@ -295,7 +321,7 @@ TEST_F(ServerTest, SeveralMessagesInOneWriteAreAllProcessedInOrder) {
 
 // --- Protocol errors (section 7.6) ---
 
-TEST_F(ServerTest, FirstMessageMustBeHello) {
+TEST_P(ServerTest, FirstMessageMustBeHello) {
     TestClient client = connect();
 
     client.send(new_order(1, Side::Buy, 100, 3));
@@ -303,7 +329,7 @@ TEST_F(ServerTest, FirstMessageMustBeHello) {
     expect_protocol_error(client, protocol::ProtocolErrorCode::HelloRequired);
 }
 
-TEST_F(ServerTest, HelloCannotBeSentTwice) {
+TEST_P(ServerTest, HelloCannotBeSentTwice) {
     TestClient client = session();
 
     client.send(protocol::Hello{.magic = protocol::magic, .version = protocol::version});
@@ -311,7 +337,7 @@ TEST_F(ServerTest, HelloCannotBeSentTwice) {
     expect_protocol_error(client, protocol::ProtocolErrorCode::HelloRequired);
 }
 
-TEST_F(ServerTest, WrongMagicIsRefused) {
+TEST_P(ServerTest, WrongMagicIsRefused) {
     TestClient client = connect();
 
     client.send(protocol::Hello{.magic = 0x12345678, .version = protocol::version});
@@ -319,7 +345,7 @@ TEST_F(ServerTest, WrongMagicIsRefused) {
     expect_protocol_error(client, protocol::ProtocolErrorCode::BadMagic);
 }
 
-TEST_F(ServerTest, UnsupportedVersionIsRefused) {
+TEST_P(ServerTest, UnsupportedVersionIsRefused) {
     TestClient client = connect();
 
     client.send(protocol::Hello{.magic = protocol::magic, .version = 2});
@@ -327,7 +353,7 @@ TEST_F(ServerTest, UnsupportedVersionIsRefused) {
     expect_protocol_error(client, protocol::ProtocolErrorCode::UnsupportedVersion);
 }
 
-TEST_F(ServerTest, UnknownMessageTypeEndsTheSession) {
+TEST_P(ServerTest, UnknownMessageTypeEndsTheSession) {
     TestClient client = session();
 
     client.send_bytes(bytes_of({0x00, 0x00, 0x7F}));
@@ -335,7 +361,7 @@ TEST_F(ServerTest, UnknownMessageTypeEndsTheSession) {
     expect_protocol_error(client, protocol::ProtocolErrorCode::UnknownType);
 }
 
-TEST_F(ServerTest, BadLengthEndsTheSession) {
+TEST_P(ServerTest, BadLengthEndsTheSession) {
     TestClient client = session();
 
     client.send_bytes(bytes_of({0xFF, 0xFF, 0x02}));
@@ -343,7 +369,7 @@ TEST_F(ServerTest, BadLengthEndsTheSession) {
     expect_protocol_error(client, protocol::ProtocolErrorCode::BadLength);
 }
 
-TEST_F(ServerTest, UndefinedFieldValueEndsTheSession) {
+TEST_P(ServerTest, UndefinedFieldValueEndsTheSession) {
     TestClient client = session();
     std::vector<std::byte> bytes;
     protocol::encode(new_order(1, Side::Buy, 100, 3), bytes);
@@ -354,7 +380,7 @@ TEST_F(ServerTest, UndefinedFieldValueEndsTheSession) {
     expect_protocol_error(client, protocol::ProtocolErrorCode::BadField);
 }
 
-TEST_F(ServerTest, MessagesBeforeAProtocolErrorAreStillAnswered) {
+TEST_P(ServerTest, ProtocolErrorIsTheLastMessageOfTheSession) {
     TestClient client = session();
     std::vector<std::byte> bytes;
     protocol::encode(new_order(1, Side::Buy, 100, 3), bytes);
@@ -363,11 +389,18 @@ TEST_F(ServerTest, MessagesBeforeAProtocolErrorAreStillAnswered) {
 
     client.send_bytes(bytes);
 
-    EXPECT_EQ(client.expect<protocol::OrderAccepted>().client_order_id, 1U);
-    expect_protocol_error(client, protocol::ProtocolErrorCode::UnknownType);
+    // The answer to the order may or may not arrive before the session ends
+    // (SPEC section 7.6), but nothing may follow the error.
+    std::optional<protocol::ServerMessage> message = client.receive();
+    if (message.has_value() && std::holds_alternative<protocol::OrderAccepted>(*message)) {
+        message = client.receive();
+    }
+    EXPECT_EQ(message, std::optional<protocol::ServerMessage>(protocol::ProtocolError{
+                           .code = protocol::ProtocolErrorCode::UnknownType}));
+    EXPECT_EQ(client.receive(), std::nullopt);
 }
 
-TEST_F(ServerTest, ProtocolErrorCancelsTheClientsOrders) {
+TEST_P(ServerTest, ProtocolErrorCancelsTheClientsOrders) {
     TestClient faulty = session();
     TestClient watcher = session();
     faulty.send(new_order(1, Side::Sell, 105, 2));
@@ -386,7 +419,7 @@ TEST_F(ServerTest, ProtocolErrorCancelsTheClientsOrders) {
 
 // --- Several clients, start and stop ---
 
-TEST_F(ServerTest, ManyClientsAreServedAtTheSameTime) {
+TEST_P(ServerTest, ManyClientsAreServedAtTheSameTime) {
     constexpr std::size_t client_count = 50;
     std::vector<TestClient> clients;
     clients.reserve(client_count);
@@ -410,8 +443,85 @@ TEST_F(ServerTest, ManyClientsAreServedAtTheSameTime) {
     EXPECT_EQ(orders.size(), client_count);
 }
 
+// --- Saturation ---
+
+TEST_P(ServerTest, BurstLargerThanTheQueuesIsFullyProcessedInOrder) {
+    constexpr ClientOrderId order_count = 5000;
+    TestClient client = session();
+    std::vector<std::byte> bytes;
+    for (ClientOrderId id = 1; id <= order_count; ++id) {
+        protocol::encode(
+            new_order(id, id % 2 == 0 ? Side::Buy : Side::Sell, id % 2 == 0 ? 100 : 200, 1), bytes);
+    }
+
+    // Written from another thread: the client must read the answers while it
+    // writes, or both sides would end up waiting for each other.
+    std::jthread writer([&client, &bytes] { client.send_bytes(bytes); });
+
+    for (ClientOrderId id = 1; id <= order_count; ++id) {
+        const auto accepted = client.expect<protocol::OrderAccepted>();
+        ASSERT_EQ(accepted.client_order_id, id);
+        ASSERT_EQ(accepted.order_id, id);
+    }
+    writer.join();
+    expect_nothing_pending(client);
+}
+
+TEST_P(ServerTest, SnapshotLargerThanTheEventQueueIsDeliveredWhole) {
+    constexpr Price level_count = 300;
+    TestClient trader = session();
+    for (Price i = 0; i < level_count; ++i) {
+        trader.send(new_order(static_cast<ClientOrderId>(i + 1), Side::Sell, 1000 + i, 1));
+        trader.expect<protocol::OrderAccepted>();
+    }
+
+    TestClient watcher = session();
+    watcher.send(protocol::Subscribe{});
+
+    EXPECT_EQ(watcher.expect<protocol::SnapshotBegin>().last_sequence,
+              static_cast<std::uint64_t>(level_count));
+    for (Price i = 0; i < level_count; ++i) {
+        ASSERT_EQ(watcher.expect<protocol::SnapshotLevel>().price, 1000 + i);
+    }
+    watcher.expect<protocol::SnapshotEnd>();
+}
+
+TEST_P(ServerTest, ClientsSendingAtTheSameTimeAreAllServed) {
+    constexpr std::size_t client_count = 8;
+    constexpr ClientOrderId orders_per_client = 500;
+
+    std::vector<std::jthread> threads;
+    threads.reserve(client_count);
+    std::array<ClientOrderId, client_count> accepted_counts{};
+    for (std::size_t i = 0; i < client_count; ++i) {
+        threads.emplace_back([this, i, &accepted_counts] {
+            TestClient client = session();
+            for (ClientOrderId id = 1; id <= orders_per_client; ++id) {
+                // Prices that never cross, so every order rests.
+                client.send(new_order(id, Side::Buy, 100, 1));
+                if (client.expect<protocol::OrderAccepted>().client_order_id == id) {
+                    ++accepted_counts.at(i);
+                }
+            }
+        });
+    }
+    threads.clear(); // Joins every thread.
+
+    for (const ClientOrderId count : accepted_counts) {
+        EXPECT_EQ(count, orders_per_client);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Modes, ServerTest,
+    ::testing::Values(Variant{.name = "Inline", .config = local_config(ServerMode::Inline)},
+                      Variant{.name = "Pipeline", .config = local_config(ServerMode::Pipeline)},
+                      Variant{.name = "PipelineTinyQueues",
+                              .config = local_config(ServerMode::Pipeline, 2)}),
+    [](const ::testing::TestParamInfo<Variant>& variant) { return variant.param.name; });
+
 TEST(ServerLifecycle, RunReturnsAfterRequestStop) {
-    Server server(ServerConfig{.port = 0});
+    Server server(local_config(ServerMode::Pipeline));
     std::jthread thread([&server] { server.run(); });
 
     server.request_stop();
@@ -421,7 +531,7 @@ TEST(ServerLifecycle, RunReturnsAfterRequestStop) {
 }
 
 TEST(ServerLifecycle, StopRequestedBeforeRunIsHonoured) {
-    Server server(ServerConfig{.port = 0});
+    Server server(local_config(ServerMode::Pipeline));
     server.request_stop();
 
     server.run();
@@ -430,7 +540,7 @@ TEST(ServerLifecycle, StopRequestedBeforeRunIsHonoured) {
 }
 
 TEST(ServerLifecycle, PortAlreadyInUseIsReported) {
-    const Server first(ServerConfig{.port = 0});
+    const Server first(local_config(ServerMode::Inline));
 
     EXPECT_THROW(Server(ServerConfig{.port = first.port()}), std::system_error);
 }

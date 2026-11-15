@@ -358,6 +358,8 @@ A protocol error means the two sides no longer agree on where messages begin, or
 
 On a protocol error the server sends `ProtocolError` if it can, then closes the connection. Closing the connection closes the session, with the effect described in section 4.3.
 
+`ProtocolError` is the last message of a session. Answers to requests that the client sent just before the faulty bytes may not be delivered: the session ends without waiting for them. The client can still rely on the state it leaves behind, because closing the session cancels every order it had (section 8.2).
+
 A business rejection is different: `OrderRejected` and `CancelRejected` are normal messages, and the session continues.
 
 ## 8. Sessions
@@ -418,9 +420,28 @@ Threads exchange messages through `SpscQueue<T>`, a bounded ring buffer for exac
 
 The server is built in two modes (decision D5).
 
-**Inline mode.** One thread does everything: it runs the event loop, decodes messages, calls the matching engine directly, and writes the answers. There is no queue and no shared state. This is the mode currently implemented.
+**Inline mode.** One thread does everything: it runs the event loop, decodes messages, calls the matching engine directly, and writes the answers. There is no queue and no shared state.
 
-**Pipeline mode.** A network thread and a matching thread connected by two SPSC queues. To be specified with its implementation.
+**Pipeline mode.** Two threads connected by two SPSC queues. This is the default.
+
+```text
+                 command queue
+network thread ─────────────────▶ engine thread
+               ◀─────────────────
+                  event queue
+```
+
+| | Network thread | Engine thread |
+|---|---|---|
+| Owns | Every socket, the sessions, the output buffers, the publisher | The matching engine and the order book |
+| Command queue | Only producer | Only consumer |
+| Event queue | Only consumer | Only producer |
+
+No data is shared between the two threads other than the queues. Each queue has exactly one producer and one consumer, as section 9.1 requires. The engine receives commands in the order the network thread queued them and events come back in the order the engine emitted them, so everything in sections 5 and 6 holds unchanged: the engine's output is the same in both modes.
+
+**Waking the network thread.** The network thread sleeps in `epoll_wait`, which watches file descriptors, not queues. The engine thread therefore writes to an `eventfd` to announce events. It does so when its command queue becomes empty, after every 64 commands otherwise, and at once if the event queue is full. The network thread resets the `eventfd` before it drains the event queue, so an event queued during or after the drain raises it again and cannot be missed.
+
+**Waiting for commands.** When its command queue is empty the engine thread either keeps polling it (`spin`: fastest reaction, one core fully used) or polls for a short while and then sleeps in naps of 100 µs (`backoff`, the default: negligible processor use when idle, slower reaction to the first command after a pause).
 
 ### 9.3 Event loop
 
@@ -444,8 +465,6 @@ The server binds and listens when it is created; failing to do so is a fatal err
 
 ## 10. Backpressure and delivery contract
 
-Sections on the queues between threads are written with the pipeline mode.
-
 ### 10.1 Slow clients
 
 Each session has an output buffer holding the bytes the kernel has not accepted yet. If it grows beyond a configured limit (1 MiB by default), the server closes the session.
@@ -453,6 +472,24 @@ Each session has an output buffer holding the bytes the kernel has not accepted 
 This gives the delivery contract for private events: a client either receives every message addressed to it, in order, or its connection is closed. Messages are never dropped individually. A closed session's orders are cancelled (section 8.2), so a client that was cut off knows the state it left: no order of that session is still active.
 
 The same rule applies to market data (decision D2): a subscriber that cannot keep up is disconnected, and gets a fresh snapshot when it connects and subscribes again.
+
+### 10.2 Full command queue
+
+When the command queue is full, the network thread keeps the command it could not queue, and everything behind it, in the session's input buffer. Until the queue has room again it reads nothing more from any socket. Unread bytes then accumulate in the kernel's buffers, the TCP receive window closes, and the sending clients are slowed down by TCP itself. No command is dropped or rejected because of load.
+
+While commands are held back, the network thread does not sleep: it keeps draining the event queue and retrying, in the order the sessions were held back.
+
+A `SessionClosed` command that cannot be queued is kept in a list and queued before any client command.
+
+### 10.3 Full event queue
+
+When the event queue is full, the engine thread wakes the network thread and waits for room. Events are never dropped.
+
+### 10.4 Why the two threads cannot block each other
+
+A cycle of two bounded queues is a classic deadlock: each thread waits for the other to take something. It is ruled out here by one rule: **the network thread never waits for the engine thread**. It never blocks on a full command queue (section 10.2), and every iteration of its loop drains the event queue. So whenever the engine thread waits for room in the event queue, the network thread is running and making that room.
+
+The network thread can always empty the event queue, because publishing an event only appends to output buffers, and a session whose buffer is over its limit is closed instead of waited for (section 10.1).
 
 ## 11. Error handling
 
@@ -596,6 +633,8 @@ The comparison answers one question: whether the lock-free queue transfers more 
 | D16 | The network side is one thread using level-triggered `epoll` on non-blocking sockets. | One thread per connection; edge-triggered `epoll`; `io_uring`. | A thread per connection would need locks around everything shared. Edge-triggered mode reports readiness only once, so a missed read stalls a connection silently; level-triggered mode cannot lose a readiness report. |
 | D17 | The command-line client shows prices in ticks and quantities in units, as whole numbers. | Decimal display with a configurable tick size. | A conversion would only exist in the client and add a place where rounding could go wrong; integers are what the protocol and the engine use. |
 | D18 | The command-line client waits for the server's answers after each command, using the cancel of order 0 as a marker. | Print answers whenever they arrive; add a dedicated ping message to the protocol. | It makes scripted sessions produce the same transcript on every run. The marker must pass through the engine to be ordered after the engine's events, which an existing request already does. |
+| D19 | An idle engine thread polls briefly, then sleeps in short naps; spinning forever is an option. | Always spin; block on a condition variable or an `eventfd`. | Spinning forever uses a whole core for a server that is mostly idle. Blocking needs a wake-up protocol whose missed-wake-up cases are subtle; naps cannot miss a wake-up and their cost is measured in the end-to-end benchmark. |
+| D20 | When the command queue is full, the network thread stops reading sockets instead of rejecting orders. | Reject with a "busy" message; block the network thread. | Stopping to read lets TCP slow the senders down with no loss and no new message type. Blocking would allow the two threads to wait for each other. |
 
 ## 16. Open questions
 

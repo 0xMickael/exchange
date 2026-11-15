@@ -21,6 +21,7 @@ namespace {
 // identifiers start at 1 and never reach the maximum, so both are free.
 constexpr std::uint64_t listener_token = 0;
 constexpr std::uint64_t stop_token = ~std::uint64_t{0};
+constexpr std::uint64_t engine_token = stop_token - 1;
 
 [[noreturn]] void throw_errno(const char* what) {
     throw std::system_error(errno, std::generic_category(), what);
@@ -41,15 +42,19 @@ void epoll_control(const net::FileDescriptor& epoll, int operation, int fd, std:
 Server::Server(const ServerConfig& config)
     : config_(config), listener_(net::listen_tcp(config.address, config.port)),
       epoll_(::epoll_create1(EPOLL_CLOEXEC)), stop_event_(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)),
-      port_(net::local_port(listener_)) {
+      engine_event_(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)), port_(net::local_port(listener_)) {
     if (!epoll_.valid()) {
         throw_errno("epoll_create1");
     }
-    if (!stop_event_.valid()) {
+    if (!stop_event_.valid() || !engine_event_.valid()) {
         throw_errno("eventfd");
     }
     epoll_control(epoll_, EPOLL_CTL_ADD, listener_.get(), EPOLLIN, listener_token);
     epoll_control(epoll_, EPOLL_CTL_ADD, stop_event_.get(), EPOLLIN, stop_token);
+    epoll_control(epoll_, EPOLL_CTL_ADD, engine_event_.get(), EPOLLIN, engine_token);
+    if (config_.mode == ServerMode::Pipeline) {
+        pipeline_ = std::make_unique<EnginePipeline>(config_.pipeline, engine_event_.get());
+    }
 }
 
 void Server::request_stop() noexcept {
@@ -64,10 +69,17 @@ void Server::request_stop() noexcept {
 void Server::run() {
     std::array<epoll_event, 64> ready{};
     bool stop_requested = false;
+    if (pipeline_) {
+        pipeline_->start();
+    }
 
     while (!stop_requested) {
+        // Normally the thread sleeps here until something happens. When
+        // commands are held back by a full queue, it must come back at once to
+        // retry them, whether or not a socket has news.
+        const int timeout = commands_held_back() ? 0 : -1;
         const int count =
-            ::epoll_wait(epoll_.get(), ready.data(), static_cast<int>(ready.size()), -1);
+            ::epoll_wait(epoll_.get(), ready.data(), static_cast<int>(ready.size()), timeout);
         if (count < 0) {
             if (errno == EINTR) {
                 continue;
@@ -79,15 +91,26 @@ void Server::run() {
             const std::uint64_t token = event.data.u64;
             if (token == stop_token) {
                 stop_requested = true;
-                continue;
-            }
-            if (token == listener_token) {
+            } else if (token == listener_token) {
                 accept_connections();
-                continue;
+            } else if (token == engine_token) {
+                // Reset the counter before draining the queue: an event queued
+                // after the drain then raises the counter again, so it cannot
+                // be missed.
+                std::uint64_t counter = 0;
+                const ssize_t bytes = ::read(engine_event_.get(), &counter, sizeof(counter));
+                static_cast<void>(bytes);
+            } else {
+                on_ready(token, event.events);
             }
-            on_ready(token, event.events);
         }
+        drain_engine_events();
+        retry_held_commands();
         finish_iteration();
+    }
+
+    if (pipeline_) {
+        pipeline_->stop();
     }
 }
 
@@ -97,7 +120,10 @@ void Server::on_ready(SessionId session_id, std::uint32_t ready_events) {
         return;
     }
     Connection& connection = it->second;
-    if ((ready_events & EPOLLIN) != 0U) {
+    // While commands are held back, nothing more is read from any socket:
+    // unread data stays in the kernel, which slows the senders down (TCP flow
+    // control) instead of letting it pile up in this process.
+    if ((ready_events & EPOLLIN) != 0U && !commands_held_back()) {
         on_readable(connection);
     }
     if ((ready_events & EPOLLOUT) != 0U && !connection.closing) {
@@ -147,6 +173,10 @@ void Server::on_readable(Connection& connection) {
     const auto chunk = std::span(read_buffer_).first(static_cast<std::size_t>(received));
     connection.input.insert(connection.input.end(), chunk.begin(), chunk.end());
 
+    process_input(connection);
+}
+
+void Server::process_input(Connection& connection) {
     // The buffer can hold several messages, or only the beginning of one.
     std::size_t consumed = 0;
     while (!connection.closing) {
@@ -159,14 +189,22 @@ void Server::on_readable(Connection& connection) {
             schedule_close(connection, decoded.error);
             break;
         }
+        if (!handle_message(connection, decoded.message)) {
+            // The command queue is full. The message stays in the buffer and
+            // is handled again later.
+            if (!connection.stalled) {
+                connection.stalled = true;
+                stalled_.push_back(connection.session_id);
+            }
+            break;
+        }
         consumed += decoded.size;
-        handle_message(connection, decoded.message);
     }
     connection.input.erase(connection.input.begin(),
                            connection.input.begin() + static_cast<std::ptrdiff_t>(consumed));
 }
 
-void Server::handle_message(Connection& connection, const protocol::ClientMessage& message) {
+bool Server::handle_message(Connection& connection, const protocol::ClientMessage& message) {
     const SessionId session_id = connection.session_id;
 
     if (const auto* hello = std::get_if<protocol::Hello>(&message)) {
@@ -181,34 +219,78 @@ void Server::handle_message(Connection& connection, const protocol::ClientMessag
             send(session_id,
                  protocol::HelloAck{.version = protocol::version, .session_id = session_id});
         }
-        return;
+        return true;
     }
     if (!connection.hello_received) {
         schedule_close(connection, protocol::ProtocolErrorCode::HelloRequired);
-        return;
+        return true;
     }
 
     if (const auto* order = std::get_if<protocol::NewOrder>(&message)) {
-        submit(NewOrder{.session_id = session_id,
-                        .client_order_id = order->client_order_id,
-                        .side = order->side,
-                        .price = order->price,
-                        .quantity = order->quantity});
-    } else if (const auto* cancel = std::get_if<protocol::CancelOrder>(&message)) {
-        submit(CancelOrder{.session_id = session_id, .order_id = cancel->order_id});
-    } else if (std::holds_alternative<protocol::Subscribe>(message)) {
-        submit(SnapshotRequest{.session_id = session_id});
+        return submit(NewOrder{.session_id = session_id,
+                               .client_order_id = order->client_order_id,
+                               .side = order->side,
+                               .price = order->price,
+                               .quantity = order->quantity});
+    }
+    if (const auto* cancel = std::get_if<protocol::CancelOrder>(&message)) {
+        return submit(CancelOrder{.session_id = session_id, .order_id = cancel->order_id});
+    }
+    return submit(SnapshotRequest{.session_id = session_id});
+}
+
+bool Server::submit(const Command& command) {
+    if (!pipeline_) {
+        events_.clear();
+        engine_.process(command, events_);
+        for (const Event& event : events_) {
+            publish(event);
+        }
+        return true;
+    }
+    // Commands the server deferred earlier go first.
+    return deferred_commands_.empty() && pipeline_->try_submit(command);
+}
+
+void Server::submit_or_defer(const Command& command) {
+    if (!submit(command)) {
+        deferred_commands_.push_back(command);
     }
 }
 
-void Server::submit(const Command& command) {
-    events_.clear();
-    engine_.process(command, events_);
-    for (const Event& event : events_) {
-        publisher_.publish(event,
-                           [this](SessionId session_id, const protocol::ServerMessage& message) {
-                               return send(session_id, message);
-                           });
+void Server::publish(const Event& event) {
+    publisher_.publish(event, [this](SessionId session_id, const protocol::ServerMessage& message) {
+        return send(session_id, message);
+    });
+}
+
+void Server::drain_engine_events() {
+    if (!pipeline_) {
+        return;
+    }
+    Event event;
+    while (pipeline_->try_take(event)) {
+        publish(event);
+    }
+}
+
+void Server::retry_held_commands() {
+    while (!deferred_commands_.empty() && pipeline_->try_submit(deferred_commands_.front())) {
+        deferred_commands_.pop_front();
+    }
+    if (!deferred_commands_.empty()) {
+        return;
+    }
+    // Connections are retried in the order they stalled. A connection that
+    // stalls again puts itself back on the list.
+    const std::vector<SessionId> stalled = std::exchange(stalled_, {});
+    for (const SessionId session_id : stalled) {
+        const auto it = connections_.find(session_id);
+        if (it == connections_.end()) {
+            continue;
+        }
+        it->second.stalled = false;
+        process_input(it->second);
     }
 }
 
@@ -324,7 +406,7 @@ void Server::close_scheduled_connections() {
 
         if (had_session) {
             // Cancels the session's orders (SPEC section 4.3).
-            submit(SessionClosed{.session_id = session_id});
+            submit_or_defer(SessionClosed{.session_id = session_id});
         }
     }
 }

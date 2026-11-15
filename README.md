@@ -1,7 +1,7 @@
 # exchange
 A C++20 limit order matching engine with TCP networking, lock-free queues, and reproducible latency benchmarks.
 
-> **Status: in development.** The matching engine, the binary protocol, a single-threaded TCP server and the command-line client work and are tested. The two-thread server and the end-to-end benchmark are not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
+> **Status: in development.** The matching engine, the binary protocol, the TCP server in both its one-thread and two-thread modes, and the command-line client work and are tested. The end-to-end benchmark is not written yet. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
 
 ## Repository layout
 
@@ -11,7 +11,7 @@ A C++20 limit order matching engine with TCP networking, lock-free queues, and r
 | `src/exchange/queue/` | Lock-free single-producer single-consumer queue |
 | `src/exchange/protocol/` | Binary wire protocol: message definitions, encoder and decoder |
 | `src/exchange/net/` | Small wrappers over Linux sockets |
-| `src/exchange/server/` | TCP server: event loop, sessions, routing of events to clients |
+| `src/exchange/server/` | TCP server: event loop, sessions, routing of events to clients, engine thread |
 | `src/exchange/client/` | Command-line client logic: commands, display, local copy of the book |
 | `apps/server/` | `exchange-server` |
 | `apps/cli/` | `exchange-cli` |
@@ -49,6 +49,8 @@ Start the server in one terminal:
 ```sh
 ./build/debug/apps/exchange-server --port 9000
 ```
+
+By default the matching engine runs on its own thread, connected to the network thread by two lock-free queues. `--mode inline` runs everything on one thread instead; `exchange-server --help` lists the options.
 
 Then start a client in two other terminals:
 

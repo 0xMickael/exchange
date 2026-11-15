@@ -22,6 +22,7 @@ add_executable(exchange_tests
     core/text_test.cpp
     protocol/codec_test.cpp
     queue/spsc_queue_test.cpp
+    server/engine_pipeline_test.cpp
     server/publisher_test.cpp
     server/server_test.cpp
     support/reference_engine.cpp)

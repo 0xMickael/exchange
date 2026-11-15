@@ -6,11 +6,14 @@
 #include "exchange/core/types.hpp"
 #include "exchange/net/file_descriptor.hpp"
 #include "exchange/protocol/messages.hpp"
+#include "exchange/server/engine_pipeline.hpp"
 #include "exchange/server/publisher.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -18,17 +21,28 @@
 
 namespace exchange::server {
 
+enum class ServerMode : std::uint8_t {
+    // One thread: the network thread calls the matching engine directly.
+    Inline,
+    // Two threads: a network thread and an engine thread, connected by queues.
+    Pipeline,
+};
+
 struct ServerConfig {
     std::string address = "127.0.0.1";
     // 0 lets the operating system choose a free port; see Server::port().
     std::uint16_t port = 9000;
     // A session whose unsent output exceeds this is closed (SPEC section 10.1).
     std::size_t max_output_bytes = std::size_t{1} << 20;
+    ServerMode mode = ServerMode::Pipeline;
+    // Used in pipeline mode only.
+    PipelineConfig pipeline{};
 };
 
-// The exchange server in inline mode (SPEC section 9.2): one thread runs the
-// event loop, decodes client messages, calls the matching engine directly and
-// writes the resulting messages back.
+// The exchange server (SPEC section 9). A network thread runs the event loop:
+// it decodes client messages, turns them into commands for the matching engine
+// and writes the resulting messages back. Depending on the mode, the engine
+// runs on that same thread or on a thread of its own.
 //
 // The event loop asks the kernel which sockets are ready (epoll), handles each
 // of them without ever blocking, and starts again. No socket operation waits:
@@ -65,6 +79,9 @@ private:
         // The kernel refused part of the output: waiting for the socket to
         // become writable again.
         bool waiting_for_writable = false;
+        // Has decoded input that could not be handed to the engine yet,
+        // because the command queue was full.
+        bool stalled = false;
         std::vector<std::byte> input;
         std::vector<std::byte> output;
     };
@@ -73,10 +90,27 @@ private:
     void on_ready(SessionId session_id, std::uint32_t ready_events);
     void accept_connections();
     void on_readable(Connection& connection);
-    void handle_message(Connection& connection, const protocol::ClientMessage& message);
+    // Decodes and handles the messages buffered for a connection. Stops early,
+    // keeping the rest buffered, if the engine cannot take more commands.
+    void process_input(Connection& connection);
+    // Returns false if the message could not be handled yet and must be retried.
+    [[nodiscard]] bool handle_message(Connection& connection,
+                                      const protocol::ClientMessage& message);
 
-    // Runs a command through the engine and publishes the resulting events.
-    void submit(const Command& command);
+    // Hands a command to the engine. Returns false, in pipeline mode only, if
+    // the command queue is full: the caller must keep the command and retry.
+    [[nodiscard]] bool submit(const Command& command);
+    // For commands the server creates itself and must not lose: queued here
+    // if the engine cannot take them now.
+    void submit_or_defer(const Command& command);
+    void publish(const Event& event);
+    // Pipeline mode: publishes the events the engine thread has produced.
+    void drain_engine_events();
+    // Pipeline mode: retries what a full command queue held back.
+    void retry_held_commands();
+    [[nodiscard]] bool commands_held_back() const noexcept {
+        return !deferred_commands_.empty() || !stalled_.empty();
+    }
     // Queues a message for a session. Returns false if the session is gone or closing.
     bool send(SessionId session_id, const protocol::ServerMessage& message);
 
@@ -92,6 +126,7 @@ private:
     net::FileDescriptor listener_;
     net::FileDescriptor epoll_;
     net::FileDescriptor stop_event_;
+    net::FileDescriptor engine_event_;
     std::uint16_t port_ = 0;
 
     // Keyed by SessionId, never by file descriptor: the kernel reuses
@@ -102,7 +137,13 @@ private:
     std::vector<SessionId> dirty_;
     std::vector<SessionId> closing_;
 
+    std::vector<SessionId> stalled_;
+    std::deque<Command> deferred_commands_;
+
+    // Inline mode uses engine_; pipeline mode uses pipeline_, which owns its
+    // own engine on its own thread.
     MatchingEngine engine_;
+    std::unique_ptr<EnginePipeline> pipeline_;
     Publisher publisher_;
     std::vector<Event> events_;
     std::array<std::byte, std::size_t{64} * 1024> read_buffer_{};

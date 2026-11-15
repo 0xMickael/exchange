@@ -14,12 +14,18 @@
 namespace {
 
 constexpr std::string_view usage =
-    "Usage: exchange-server [--address ADDRESS] [--port PORT]\n"
+    "Usage: exchange-server [OPTIONS]\n"
     "\n"
     "Runs the exchange until interrupted (Ctrl-C).\n"
     "\n"
-    "  --address ADDRESS  IPv4 address to listen on (default 127.0.0.1)\n"
-    "  --port PORT        TCP port to listen on (default 9000)\n";
+    "  --address ADDRESS          IPv4 address to listen on (default 127.0.0.1)\n"
+    "  --port PORT                TCP port to listen on (default 9000)\n"
+    "  --mode pipeline|inline     pipeline: the matching engine has its own thread,\n"
+    "                             connected to the network thread by queues (default)\n"
+    "                             inline: one thread does everything\n"
+    "  --engine-wait backoff|spin what the engine thread does when idle (pipeline mode)\n"
+    "                             backoff: sleeps in short naps (default)\n"
+    "                             spin: never sleeps, and uses a whole core\n";
 
 // Set before the signal handlers are installed and never changed afterwards.
 exchange::server::Server* running_server = nullptr; // NOLINT(*-avoid-non-const-global-variables)
@@ -37,6 +43,49 @@ bool parse_port(std::string_view text, std::uint16_t& port) {
     return error == std::errc{} && parsed_end == end;
 }
 
+bool parse_mode(std::string_view text, exchange::server::ServerMode& mode) {
+    if (text == "inline") {
+        mode = exchange::server::ServerMode::Inline;
+        return true;
+    }
+    if (text == "pipeline") {
+        mode = exchange::server::ServerMode::Pipeline;
+        return true;
+    }
+    return false;
+}
+
+bool parse_wait(std::string_view text, exchange::server::EngineWait& wait) {
+    if (text == "backoff") {
+        wait = exchange::server::EngineWait::Backoff;
+        return true;
+    }
+    if (text == "spin") {
+        wait = exchange::server::EngineWait::Spin;
+        return true;
+    }
+    return false;
+}
+
+// Stores the value of one option. Returns false if the option or its value is not valid.
+bool apply_option(std::string_view name, std::string_view value,
+                  exchange::server::ServerConfig& config) {
+    if (name == "--address") {
+        config.address = value;
+        return true;
+    }
+    if (name == "--port") {
+        return parse_port(value, config.port);
+    }
+    if (name == "--mode") {
+        return parse_mode(value, config.mode);
+    }
+    if (name == "--engine-wait") {
+        return parse_wait(value, config.pipeline.wait);
+    }
+    return false;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -49,12 +98,7 @@ int main(int argc, char** argv) {
             std::cout << usage;
             return EXIT_SUCCESS;
         }
-        const bool has_value = i + 1 < arguments.size();
-        if (name == "--address" && has_value) {
-            config.address = arguments[i + 1];
-        } else if (name == "--port" && has_value && parse_port(arguments[i + 1], config.port)) {
-            continue;
-        } else {
+        if (i + 1 >= arguments.size() || !apply_option(name, arguments[i + 1], config)) {
             std::cerr << "error: invalid argument " << name << "\n\n" << usage;
             return EXIT_FAILURE;
         }
@@ -69,8 +113,9 @@ int main(int argc, char** argv) {
         sigaction(SIGINT, &action, nullptr);
         sigaction(SIGTERM, &action, nullptr);
 
-        std::cout << "exchange-server listening on " << config.address << ':' << server.port()
-                  << '\n'
+        std::cout << "exchange-server ("
+                  << (config.mode == exchange::server::ServerMode::Inline ? "inline" : "pipeline")
+                  << " mode) listening on " << config.address << ':' << server.port() << '\n'
                   << std::flush; // Visible at once, even when the output is a pipe.
         server.run();
         running_server = nullptr;

@@ -21,10 +21,13 @@ add_library(exchange_net STATIC
 target_include_directories(exchange_net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(exchange_net PRIVATE exchange_warnings)
 
+find_package(Threads REQUIRED)
+
 add_library(exchange_server STATIC
+    exchange/server/engine_pipeline.cpp
     exchange/server/server.cpp)
 target_link_libraries(exchange_server
-    PUBLIC exchange_core exchange_net exchange_protocol
+    PUBLIC exchange_core exchange_net exchange_protocol exchange_queue Threads::Threads
     PRIVATE exchange_warnings)
 
 add_library(exchange_client STATIC
