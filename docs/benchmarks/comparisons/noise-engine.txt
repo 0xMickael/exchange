@@ -1,0 +1,8 @@
+5 rounds, baseline and candidate run alternately
+arguments: engine
+                                                   baseline                      candidate   change
+                                       median  (min .. max)           median  (min .. max)
+engine p50 ns                        158.0 (157.0 .. 159.0)         159.0 (157.0 .. 161.0)     +0.6%
+engine p99 ns                        368.0 (365.0 .. 374.0)         373.0 (363.0 .. 378.0)     +1.4%
+engine mean ns                       166.7 (165.8 .. 168.7)         169.0 (165.5 .. 170.4)     +1.4%
+engine per_second /s           6785459.0 (6739937.0 .. 6842877.0)   6645108.0 (6303967.0 .. 6814468.0)     -2.1%

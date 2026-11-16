@@ -226,7 +226,7 @@ These hold after every command. A test-only checker verifies them.
 - **I3.** Every level's total equals the sum of its orders' remaining quantities, and no level is empty.
 - **I4.** Within a level, `OrderId`s are strictly increasing from front to back.
 - **I5.** The cancel index contains exactly the active orders.
-- **I6.** Each session's order set contains exactly that session's active orders.
+- **I6.** Each session's order list contains exactly that session's active orders, in increasing `OrderId` order.
 - **I7.** Every `Trade` is preceded by exactly two `Fill` events with the same price and quantity.
 
 ## 6. Event delivery and market data
@@ -439,7 +439,9 @@ network thread ─────────────────▶ engine thr
 
 No data is shared between the two threads other than the queues. Each queue has exactly one producer and one consumer, as section 9.1 requires. The engine receives commands in the order the network thread queued them and events come back in the order the engine emitted them, so everything in sections 5 and 6 holds unchanged: the engine's output is the same in both modes.
 
-**Waking the network thread.** The network thread sleeps in `epoll_wait`, which watches file descriptors, not queues. The engine thread therefore writes to an `eventfd` to announce events. It does so when its command queue becomes empty, after every 64 commands otherwise, and at once if the event queue is full. The network thread resets the `eventfd` before it drains the event queue, so an event queued during or after the drain raises it again and cannot be missed.
+**Collecting the answers.** The network thread sleeps in `epoll_wait`, which watches file descriptors, not queues, so it would not notice an event arriving in the event queue. The rule is therefore: **the network thread does not sleep while the engine thread owes it answers.** It counts the commands it has queued; the engine thread counts the commands it has finished, and counts a command only after queuing all of its events. As long as the second count is behind the first, the network thread keeps going round its loop without sleeping, taking events on every turn. Once the counts are equal and the event queue has been emptied, no event can appear until the network thread itself queues another command, so it can sleep safely and the engine thread never has to wake it up.
+
+The answers are a few microseconds away, far less than the time the kernel takes to put a thread to sleep and wake it up again, so this costs little processor time and removes one wake-up from every request (decision D24).
 
 **Waiting for commands.** When its command queue is empty the engine thread either keeps polling it (`spin`: fastest reaction, one core fully used) or polls for a short while and then sleeps in naps of 100 µs (`backoff`, the default: negligible processor use when idle, slower reaction to the first command after a pause).
 
@@ -447,7 +449,7 @@ No data is shared between the two threads other than the queues. Each queue has 
 
 The network side is a single-threaded event loop on Linux `epoll`:
 
-1. Ask the kernel which sockets are ready (`epoll_wait`). This is the only place where the thread sleeps.
+1. Ask the kernel which sockets are ready (`epoll_wait`). This is the only place where the thread sleeps. It asks without sleeping while commands are held back (section 10.2) or the engine thread owes answers (section 9.2).
 2. For each ready socket: accept new connections, or read what has arrived and process every complete message, or continue a pending write.
 3. Send the output produced during this iteration, then close the sessions that must be closed.
 
@@ -458,6 +460,8 @@ Rules:
 - Messages produced for a session during one iteration are sent with one write.
 - Closing a session is deferred to the end of the iteration, because the code that detects the reason is often still working with that session.
 - Nagle's algorithm is disabled on every connection (`TCP_NODELAY`).
+
+**Waiting for network activity.** By default the thread sleeps in `epoll_wait` when it has nothing to do (`sleep`). It can instead be told never to sleep and to keep asking the kernel (`spin`): requests are then answered without waiting for the kernel to wake the thread, at the price of one core fully used at all times (decision D25).
 
 ### 9.4 Startup and shutdown
 
@@ -496,7 +500,7 @@ A `SessionClosed` command that cannot be queued is kept in a list and queued bef
 
 ### 10.3 Full event queue
 
-When the event queue is full, the engine thread wakes the network thread and waits for room. Events are never dropped.
+When the event queue is full, the engine thread waits for room. The network thread is awake at that moment, because the command being processed is not finished (section 9.2), and it empties the queue on every turn of its loop. Events are never dropped.
 
 ### 10.4 Why the two threads cannot block each other
 
@@ -616,7 +620,7 @@ The comparison answers one question: whether the lock-free queue transfers more 
 
 **Boundary.** The clock starts just before the client hands a request to the kernel and stops when the client has read the message that answers it: `OrderAccepted` for an order, `OrderCancelled` or `CancelRejected` for a cancel. Fills that follow an acceptance are not waited for. The measurement includes the client's and the server's system calls, the loopback TCP path in both directions, decoding, queues, matching and encoding. It is not comparable with the engine benchmark.
 
-**Setup.** The server runs in the benchmark's process, on its own thread or threads, on an ephemeral port. Each client connection has its own thread, which spins on a non-blocking socket and never sleeps, so that the time the operating system takes to wake a sleeping client is not attributed to the server. Client threads and server threads share the same processor.
+**Setup.** The server runs in the benchmark's process, on its own thread or threads, on an ephemeral port. Each client connection has its own thread, which spins on a non-blocking socket and never sleeps, so that the time the operating system takes to wake a sleeping client is not attributed to the server. The thread that coordinates a run sleeps until the clients have finished, so that it does not occupy a core during the measurement. Client threads and server threads share the same processor.
 
 **Workload.** The mix of section 13.2, decided at run time by each connection: a cancel targets one of that connection's own resting orders, which it tracks from the answers it receives. A cancel can therefore reach the server after its order was filled by another connection; such cancels are rejected and counted in the report.
 
@@ -627,7 +631,18 @@ The comparison answers one question: whether the lock-free queue transfers more 
 
 **Procedure.** For each server configuration and each run: start a new server, let every connection place its share of the initial orders, start all connections together, and measure. The summary line is the median of each statistic across runs.
 
-### 13.7 Known limits
+### 13.7 Comparing two versions
+
+A change is judged by comparing two builds of the benchmark in the same session, never by comparing a new result with a number measured on another day: on the reference machine, results move by 20 to 30 % from one session to the next.
+
+- The two builds are run alternately (before, after, before, after, and so on) for several rounds, so that a change in the machine's speed during the comparison affects both.
+- For each statistic the comparison reports the median over the rounds, with the lowest and the highest value.
+- The noise is measured first, by comparing a build with itself. A difference smaller than that noise is reported as no difference.
+- Every published comparison states its number of rounds and of runs per round.
+
+`scripts/ab_compare.py` automates this.
+
+### 13.8 Known limits
 
 - Measurements taken under WSL2 run in a virtual machine. They are labeled as such and are indicative, especially the high percentiles and the maximum.
 - The benchmark does not pin its thread to a core, isolate cores, or control processor frequency scaling.
@@ -652,7 +667,7 @@ The comparison answers one question: whether the lock-free queue transfers more 
 | D6 | GoogleTest is the only third-party dependency. Benchmarks use a harness written in this repository. | Catch2 or doctest; Google Benchmark; HdrHistogram. | GoogleTest is the framework most widely used in C++ industry codebases. The benchmark harness needs full latency distributions, which is a small amount of code. |
 | D7 | One `BookUpdate` per level per command, emitted after the last trade at that level. | One `BookUpdate` per trade. | A large order sweeping one level produces one update instead of one per resting order. |
 | D8 | A single cancel reject reason, `UnknownOrder`. | Separate reasons for filled, cancelled, and foreign orders. | Avoids unbounded history and does not reveal other sessions' orders. |
-| D9 | The book uses standard containers: an ordered map of price levels per side, a linked list of orders per level, and a hash map from `OrderId` to the order's position. | A sorted array of levels; an array indexed by price; a custom memory pool. | It is the simplest structure with the right complexity for every operation. It is the baseline that later optimizations must beat in a benchmark. |
+| D9 | The book uses standard containers: an ordered map of price levels per side, a linked list of orders per level, and a hash map from `OrderId` to the order's position. | A sorted array of levels; an array indexed by price; a custom memory pool. | It is the simplest structure with the right complexity for every operation. It is the baseline that later optimizations must beat in a benchmark (see D23 for the one that did). |
 | D10 | `Price`, `Quantity` and the identifier types are plain integer aliases. Aggregates are built with designated initializers, which static analysis enforces. | A distinct wrapper type for each. | Wrapper types catch swapped arguments at compile time but need operator boilerplate. Naming every field at the construction site covers most of the same risk. |
 | D11 | Latencies are timed with the processor's timestamp counter, calibrated against `steady_clock` and cross-checked after every pass. | `steady_clock` only. | Under WSL2 `steady_clock` advances in steps of 100 ns, which is too coarse for operations of about 500 ns. |
 | D12 | Threads communicate through a lock-free SPSC ring buffer written for this project. | A queue protected by a mutex; an existing library. | Writing it is one of the project's goals. It is kept only because the benchmark shows a gain over the mutex version (docs/BENCHMARKS.md). |
@@ -665,7 +680,11 @@ The comparison answers one question: whether the lock-free queue transfers more 
 | D19 | An idle engine thread polls briefly, then sleeps in short naps; spinning forever is an option. | Always spin; block on a condition variable or an `eventfd`. | Spinning forever uses a whole core for a server that is mostly idle. Blocking needs a wake-up protocol whose missed-wake-up cases are subtle; naps cannot miss a wake-up and their cost is measured in the end-to-end benchmark. |
 | D20 | When the command queue is full, the network thread stops reading sockets instead of rejecting orders. | Reject with a "busy" message; block the network thread. | Stopping to read lets TCP slow the senders down with no loss and no new message type. Blocking would allow the two threads to wait for each other. |
 | D21 | The number of active orders is not capped. | A global cap; a cap per session. | Without accounts, neither gives real protection: a global cap lets one client fill the book and block everyone else, and a per-session cap is bypassed by opening more connections. It is listed as a known limitation instead of adding a reject reason that protects nothing. |
-| D22 | Pipeline mode stays the default although inline mode is faster in the end-to-end benchmark on the reference machine. | Make inline the default. | The measurements show that the network path, not matching, dominates a request, so a second thread has nothing to relieve. The pipeline is nonetheless the architecture this project is about; the result is documented instead of hidden, and both modes remain one option away. |
+| D22 | Pipeline mode is the default. | Make inline the default. | The pipeline is the architecture this project is about. In the first end-to-end measurements inline mode answered 1.3 times faster with one client; since D24 the gap is about 15 % with one client and under 5 % in throughput with four. The network path, not matching, dominates a request, so the second thread has nothing to relieve there. Both modes remain one option away. |
+| D23 | The orders of a session are chained to one another inside the book, oldest first. | An ordered set of `OrderId`s per session, kept by the engine (the first implementation). | Profiling showed that maintaining the ordered set took more time than matching: a tree to search and rebalance for every order added, filled or cancelled. The chain needs no search and no memory of its own. Measured gain in docs/BENCHMARKS.md. |
+| D24 | The network thread does not sleep while the engine thread owes it answers, and the engine thread never wakes it up. | The engine thread signals its events through an `eventfd` (the first implementation). | With the signal, every request made the network thread sleep and be woken a second time, which cost more than the matching it was waiting for. Without it there is one mechanism less, and no missed-wake-up case to reason about. Measured gain in docs/BENCHMARKS.md. |
+| D25 | The network thread sleeps when idle; never sleeping is an option. | Never sleep by default. | Not sleeping answers about five times faster on the reference machine, where waking a thread is slow, but uses a whole core for a server that is mostly idle. The option exists mainly to measure what the wake-up costs. |
+| D26 | Orders are allocated one by one with the default allocator. | Take them from a memory pool (`std::pmr::unsynchronized_pool_resource`). | Measured: with the standard pool the engine was about 28 % slower. The default allocator already keeps recently freed small blocks at hand, and the pool adds an indirect call and a search by size to every allocation. A pool written for this one use could do better, but allocation is a small part of what is left (docs/BENCHMARKS.md). |
 
 ## 16. Known limitations
 

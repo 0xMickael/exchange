@@ -1,7 +1,7 @@
 # exchange
 A C++20 limit order matching engine with TCP networking, lock-free queues, and reproducible latency benchmarks.
 
-> **Status: in development.** The matching engine, the binary protocol, the TCP server in both its one-thread and two-thread modes, the command-line client and the benchmarks work and are tested. Profile-guided optimization and a demo script remain to be done. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
+> **Status: in development.** The matching engine, the binary protocol, the TCP server in both its one-thread and two-thread modes, the command-line client and the benchmarks work and are tested. A demo script and a final review remain to be done. The behavior is specified in [docs/SPEC.md](docs/SPEC.md).
 
 ## Repository layout
 
@@ -21,6 +21,7 @@ A C++20 limit order matching engine with TCP networking, lock-free queues, and r
 | `docs/SPEC.md` | Technical specification |
 | `docs/BENCHMARKS.md` | Measured results and how to reproduce them |
 | `scripts/check.sh` | Runs every check that CI runs |
+| `scripts/ab_compare.py` | Compares two builds of the benchmark by running them alternately |
 
 ## Building and testing
 
@@ -50,7 +51,7 @@ Start the server in one terminal:
 ./build/debug/apps/exchange-server --port 9000
 ```
 
-By default the matching engine runs on its own thread, connected to the network thread by two lock-free queues. `--mode inline` runs everything on one thread instead; `exchange-server --help` lists the options.
+By default the matching engine runs on its own thread, connected to the network thread by two lock-free queues. `--mode inline` runs everything on one thread instead. `--network-wait spin` keeps the network thread from ever sleeping, which answers faster and uses a whole core. `exchange-server --help` lists the options.
 
 Then start a client in two other terminals:
 
@@ -103,9 +104,9 @@ cmake --workflow --preset release
 ./build/release/bench/exchange-bench e2e
 ```
 
-On the reference machine (a laptop under WSL2): about 0.4 µs per command in the engine alone, and about 65 µs per request end to end over loopback TCP.
+On the reference machine (a laptop under WSL2): about 0.2 µs per command in the engine alone, and about 60 µs per request end to end over loopback TCP, of which about 80 % is the time the system takes to wake a sleeping thread.
 
-Measured results, with the machine and method they come from, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Measured results, the machine and method they come from, and what each optimization gained or failed to gain, are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Formatting and static analysis
 

@@ -1,0 +1,17 @@
+5 rounds, baseline and candidate run alternately
+arguments: e2e --rate 1000 --requests 5000 --runs 3
+candidate only: --network-wait spin
+                                                   baseline                      candidate   change
+                                       median  (min .. max)           median  (min .. max)
+inline p50 us                           98.0 (97.8 .. 99.4)            21.5 (21.3 .. 23.1)    -78.0%
+inline p99 us                        134.1 (132.7 .. 139.8)           83.8 (58.5 .. 180.6)    -37.5%
+inline mean us                         98.2 (93.9 .. 112.0)            25.0 (23.2 .. 47.0)    -74.6%
+inline per_second /s              1000.0 (1000.0 .. 1000.0)      1000.0 (1000.0 .. 1000.0)     +0.0%
+pipeline (backoff) p50 us            187.1 (186.0 .. 190.2)         120.2 (115.5 .. 131.7)    -35.7%
+pipeline (backoff) p99 us            307.7 (299.3 .. 331.3)        350.9 (234.5 .. 2486.7)    +14.1%
+pipeline (backoff) mean us           202.0 (194.9 .. 219.9)         177.6 (119.9 .. 199.7)    -12.1%
+pipeline (backoff) per_second /s    1000.0 (1000.0 .. 1000.0)      1000.0 (1000.0 .. 1000.0)     +0.0%
+pipeline (spin) p50 us               104.3 (103.9 .. 105.5)            25.1 (24.6 .. 32.2)    -75.9%
+pipeline (spin) p99 us               140.5 (135.3 .. 223.8)        104.4 (65.9 .. 10743.9)    -25.7%
+pipeline (spin) mean us              103.7 (103.0 .. 157.8)           34.0 (27.5 .. 332.0)    -67.2%
+pipeline (spin) per_second /s     1000.0 (1000.0 .. 1000.0)      1000.0 (1000.0 .. 1000.0)     +0.0%

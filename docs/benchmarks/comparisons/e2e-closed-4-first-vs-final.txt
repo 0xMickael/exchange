@@ -1,0 +1,16 @@
+5 rounds, baseline and candidate run alternately
+arguments: e2e --connections 4 --requests 30000 --runs 3
+                                                   baseline                      candidate   change
+                                       median  (min .. max)           median  (min .. max)
+inline p50 us                           41.7 (41.2 .. 42.8)            38.9 (38.4 .. 39.8)     -6.8%
+inline p99 us                        128.2 (125.7 .. 136.0)         120.1 (117.0 .. 121.8)     -6.3%
+inline mean us                          48.5 (47.5 .. 53.0)            45.2 (44.2 .. 48.1)     -7.0%
+inline per_second /s           77778.0 (71171.0 .. 81339.0)   83206.0 (81137.0 .. 84962.0)     +7.0%
+pipeline (backoff) p50 us               49.7 (47.9 .. 54.6)            40.7 (39.4 .. 43.5)    -18.2%
+pipeline (backoff) p99 us            159.7 (156.2 .. 204.4)         122.7 (118.8 .. 140.1)    -23.2%
+pipeline (backoff) mean us              57.2 (55.7 .. 63.3)            49.0 (47.3 .. 52.6)    -14.3%
+pipeline (backoff) per_second /s 69083.0 (62414.0 .. 70862.0)   79732.0 (73768.0 .. 82798.0)    +15.4%
+pipeline (spin) p50 us                  48.0 (45.7 .. 51.9)            39.4 (38.2 .. 42.1)    -17.9%
+pipeline (spin) p99 us               151.0 (144.0 .. 160.0)         121.1 (118.1 .. 122.0)    -19.8%
+pipeline (spin) mean us                 55.1 (52.7 .. 62.6)            48.1 (46.8 .. 49.1)    -12.6%
+pipeline (spin) per_second /s  71653.0 (62996.0 .. 74822.0)   81696.0 (79979.0 .. 83753.0)    +14.0%

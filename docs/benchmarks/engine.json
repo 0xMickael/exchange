@@ -1,0 +1,15 @@
+{
+  "benchmark": "engine",
+  "environment": {"compiler": "GCC 15.2.0", "build_type": "Release", "compiler_flags": "-O3 -DNDEBUG", "sanitizer": "", "operating_system": "Linux 6.18.58.1-microsoft-standard-WSL2", "wsl": true, "cpu_model": "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz", "logical_cpus": 8},
+  "workload": {"seed": 42, "initial_orders": 10000, "commands": 1000000, "sessions": 8, "price_levels": 50, "cancel_percent": 40, "aggressive_percent": 10, "mid_price": 100000, "max_quantity": 100},
+  "workload_stats": {"passive_orders": 500152, "aggressive_orders": 100028, "cancels": 399820, "trades": 197919, "events": 2648700, "final_orders": 10395, "final_bid_levels": 44, "final_ask_levels": 46},
+  "method": {"warmup_runs": 1, "runs": 5, "clock": "tsc", "clock_ticks_per_nanosecond": 1.992, "clock_smallest_interval_ns": 10.5, "clock_reading_cost_ns": 13.1},
+  "runs": [
+    {"latency_ns": {"min": 56, "p50": 174, "p95": 355, "p99": 653, "p99_9": 1868, "max": 210348, "mean": 201.2}, "commands_per_second": 5787309},
+    {"latency_ns": {"min": 61, "p50": 186, "p95": 311, "p99": 508, "p99_9": 1040, "max": 182073, "mean": 200.6}, "commands_per_second": 6146595},
+    {"latency_ns": {"min": 57, "p50": 174, "p95": 326, "p99": 596, "p99_9": 1867, "max": 232014, "mean": 195.3}, "commands_per_second": 5199935},
+    {"latency_ns": {"min": 59, "p50": 183, "p95": 380, "p99": 729, "p99_9": 2359, "max": 280507, "mean": 215.1}, "commands_per_second": 5371325},
+    {"latency_ns": {"min": 58, "p50": 179, "p95": 287, "p99": 476, "p99_9": 1171, "max": 199039, "mean": 191.6}, "commands_per_second": 6430897}
+  ],
+  "median": {"latency_ns": {"min": 58, "p50": 179, "p95": 326, "p99": 596, "p99_9": 1867, "max": 210348, "mean": 200.6}, "commands_per_second": 5787309}
+}
