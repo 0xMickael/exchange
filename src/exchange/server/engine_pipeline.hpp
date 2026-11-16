@@ -37,11 +37,13 @@ struct PipelineConfig {
 // The engine thread is the only one that touches the MatchingEngine. The
 // network thread is the only producer of commands and the only consumer of
 // events, as the queues require.
+//
+// The engine thread never wakes the network thread up. The network thread
+// must therefore keep taking events, without sleeping, for as long as
+// processed() is behind the number of commands it has submitted.
 class EnginePipeline {
 public:
-    // `notify_fd` is an eventfd that the engine thread writes to when it has
-    // produced events, so that a network thread sleeping in epoll wakes up.
-    EnginePipeline(const PipelineConfig& config, int notify_fd);
+    explicit EnginePipeline(const PipelineConfig& config);
     ~EnginePipeline();
 
     EnginePipeline(const EnginePipeline&) = delete;
@@ -69,12 +71,10 @@ private:
     // Queues one event, waiting for room if necessary. Returns false if the
     // thread was asked to stop while waiting.
     bool emit(const Event& event, const std::stop_token& stop);
-    void notify() const noexcept;
 
     SpscQueue<Command> commands_;
     SpscQueue<Event> events_;
     EngineWait wait_;
-    int notify_fd_;
     MatchingEngine engine_;
     // Written by the engine thread after each command. On a cache line of its
     // own, away from what the network thread writes.

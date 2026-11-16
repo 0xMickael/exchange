@@ -22,7 +22,6 @@ namespace {
 // identifiers start at 1 and never reach the maximum, so both are free.
 constexpr std::uint64_t listener_token = 0;
 constexpr std::uint64_t stop_token = ~std::uint64_t{0};
-constexpr std::uint64_t engine_token = stop_token - 1;
 
 [[noreturn]] void throw_errno(const char* what) {
     throw std::system_error(errno, std::generic_category(), what);
@@ -43,18 +42,17 @@ void epoll_control(const net::FileDescriptor& epoll, int operation, int fd, std:
 Server::Server(const ServerConfig& config)
     : config_(config), listener_(net::listen_tcp(config.address, config.port)),
       epoll_(::epoll_create1(EPOLL_CLOEXEC)), stop_event_(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)),
-      engine_event_(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)), port_(net::local_port(listener_)) {
+      port_(net::local_port(listener_)) {
     if (!epoll_.valid()) {
         throw_errno("epoll_create1");
     }
-    if (!stop_event_.valid() || !engine_event_.valid()) {
+    if (!stop_event_.valid()) {
         throw_errno("eventfd");
     }
     epoll_control(epoll_, EPOLL_CTL_ADD, listener_.get(), EPOLLIN, listener_token);
     epoll_control(epoll_, EPOLL_CTL_ADD, stop_event_.get(), EPOLLIN, stop_token);
-    epoll_control(epoll_, EPOLL_CTL_ADD, engine_event_.get(), EPOLLIN, engine_token);
     if (config_.mode == ServerMode::Pipeline) {
-        pipeline_ = std::make_unique<EnginePipeline>(config_.pipeline, engine_event_.get());
+        pipeline_ = std::make_unique<EnginePipeline>(config_.pipeline);
     }
 }
 
@@ -75,10 +73,8 @@ void Server::run() {
     }
 
     while (!stop_requested) {
-        // Normally the thread sleeps here until something happens. When
-        // commands are held back by a full queue, it must come back at once to
-        // retry them, whether or not a socket has news.
-        const int timeout = commands_held_back() ? 0 : -1;
+        // Normally the thread sleeps here until something happens.
+        const int timeout = must_not_sleep() ? 0 : -1;
         const int count =
             ::epoll_wait(epoll_.get(), ready.data(), static_cast<int>(ready.size()), timeout);
         if (count < 0) {
@@ -94,13 +90,6 @@ void Server::run() {
                 stop_requested = true;
             } else if (token == listener_token) {
                 accept_connections();
-            } else if (token == engine_token) {
-                // Reset the counter before draining the queue: an event queued
-                // after the drain then raises the counter again, so it cannot
-                // be missed.
-                std::uint64_t counter = 0;
-                const ssize_t bytes = ::read(engine_event_.get(), &counter, sizeof(counter));
-                static_cast<void>(bytes);
             } else {
                 on_ready(token, event.events);
             }
@@ -111,6 +100,19 @@ void Server::run() {
     }
 
     shut_down();
+}
+
+bool Server::must_not_sleep() const noexcept {
+    // Commands held back by a full queue must be retried whether or not a
+    // socket has news.
+    if (commands_held_back() || config_.network_wait == NetworkWait::Spin) {
+        return true;
+    }
+    // Pipeline mode: the engine thread still owes answers. They are a few
+    // microseconds away, much less than the kernel takes to put this thread
+    // to sleep and wake it up again. Nothing would wake it up, either: the
+    // engine thread does not signal its events, it relies on this rule.
+    return commands_answered_ < commands_submitted_;
 }
 
 void Server::shut_down() {
@@ -335,10 +337,15 @@ void Server::drain_engine_events() {
     if (!pipeline_) {
         return;
     }
+    // Read before emptying the queue: the engine thread queues the events of a
+    // command before it counts the command, so every event of the commands
+    // counted here is taken by the loop below.
+    const std::uint64_t processed = pipeline_->processed();
     Event event;
     while (pipeline_->try_take(event)) {
         publish(event);
     }
+    commands_answered_ = processed;
 }
 
 void Server::retry_held_commands() {

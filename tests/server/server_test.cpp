@@ -41,9 +41,7 @@ std::vector<std::byte> bytes_of(std::initializer_list<unsigned> values) {
     return bytes;
 }
 
-// The server configurations every test runs against. The last one has queues
-// so small that they are full almost all the time, which exercises every
-// backpressure path with the ordinary tests.
+// A server configuration that every test runs against; variants() lists them.
 struct Variant {
     std::string name;
     ServerConfig config;
@@ -62,6 +60,24 @@ ServerConfig local_config(ServerMode mode, std::size_t queue_capacity = 0) {
         config.pipeline.event_queue_capacity = queue_capacity;
     }
     return config;
+}
+
+// The same configuration with a network thread that never sleeps.
+ServerConfig spinning(ServerConfig config) {
+    config.network_wait = NetworkWait::Spin;
+    return config;
+}
+
+// "PipelineTinyQueues" has queues so small that they are full almost all the
+// time, which exercises every backpressure path with the ordinary tests.
+std::vector<Variant> variants() {
+    return {
+        Variant{.name = "Inline", .config = local_config(ServerMode::Inline)},
+        Variant{.name = "Pipeline", .config = local_config(ServerMode::Pipeline)},
+        Variant{.name = "PipelineTinyQueues", .config = local_config(ServerMode::Pipeline, 2)},
+        Variant{.name = "InlineSpin", .config = spinning(local_config(ServerMode::Inline))},
+        Variant{.name = "PipelineSpin", .config = spinning(local_config(ServerMode::Pipeline))},
+    };
 }
 
 class ServerTest : public ::testing::TestWithParam<Variant> {
@@ -736,21 +752,15 @@ TEST_P(ServerLimitsTest, StoppingSendsWhatClientsHaveNotReadYet) {
     EXPECT_LE(received, order_count);
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    Modes, ServerLimitsTest,
-    ::testing::Values(Variant{.name = "Inline", .config = local_config(ServerMode::Inline)},
-                      Variant{.name = "Pipeline", .config = local_config(ServerMode::Pipeline)},
-                      Variant{.name = "PipelineTinyQueues",
-                              .config = local_config(ServerMode::Pipeline, 2)}),
-    [](const ::testing::TestParamInfo<Variant>& variant) { return variant.param.name; });
+INSTANTIATE_TEST_SUITE_P(Modes, ServerLimitsTest, ::testing::ValuesIn(variants()),
+                         [](const ::testing::TestParamInfo<Variant>& variant) {
+                             return variant.param.name;
+                         });
 
-INSTANTIATE_TEST_SUITE_P(
-    Modes, ServerTest,
-    ::testing::Values(Variant{.name = "Inline", .config = local_config(ServerMode::Inline)},
-                      Variant{.name = "Pipeline", .config = local_config(ServerMode::Pipeline)},
-                      Variant{.name = "PipelineTinyQueues",
-                              .config = local_config(ServerMode::Pipeline, 2)}),
-    [](const ::testing::TestParamInfo<Variant>& variant) { return variant.param.name; });
+INSTANTIATE_TEST_SUITE_P(Modes, ServerTest, ::testing::ValuesIn(variants()),
+                         [](const ::testing::TestParamInfo<Variant>& variant) {
+                             return variant.param.name;
+                         });
 
 TEST(ServerLifecycle, RunReturnsAfterRequestStop) {
     Server server(local_config(ServerMode::Pipeline));

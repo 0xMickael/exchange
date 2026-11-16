@@ -29,6 +29,16 @@ enum class ServerMode : std::uint8_t {
     Pipeline,
 };
 
+// What the network thread does when no socket has anything for it.
+enum class NetworkWait : std::uint8_t {
+    // Sleep in the kernel until something happens. Uses no processor time when
+    // idle; the price is the time the kernel takes to wake the thread up.
+    Sleep,
+    // Never sleep: ask the kernel again and again. Reacts as fast as possible
+    // and uses a whole core all the time.
+    Spin,
+};
+
 struct ServerConfig {
     std::string address = "127.0.0.1";
     // 0 lets the operating system choose a free port; see Server::port().
@@ -42,6 +52,7 @@ struct ServerConfig {
     // not read yet (SPEC section 9.4).
     std::chrono::milliseconds shutdown_grace{1000};
     ServerMode mode = ServerMode::Pipeline;
+    NetworkWait network_wait = NetworkWait::Sleep;
     // Used in pipeline mode only.
     PipelineConfig pipeline{};
 };
@@ -118,6 +129,9 @@ private:
     [[nodiscard]] bool commands_held_back() const noexcept {
         return !deferred_commands_.empty() || !stalled_.empty();
     }
+    // Whether the event loop must come back at once instead of sleeping until
+    // a socket has news.
+    [[nodiscard]] bool must_not_sleep() const noexcept;
     // Queues a message for a session. Returns false if the session is gone or closing.
     bool send(SessionId session_id, const protocol::ServerMessage& message);
 
@@ -137,7 +151,6 @@ private:
     net::FileDescriptor listener_;
     net::FileDescriptor epoll_;
     net::FileDescriptor stop_event_;
-    net::FileDescriptor engine_event_;
     std::uint16_t port_ = 0;
 
     // Keyed by SessionId, never by file descriptor: the kernel reuses
@@ -152,6 +165,9 @@ private:
     std::deque<Command> deferred_commands_;
     // Pipeline mode: commands handed to the engine thread so far.
     std::uint64_t commands_submitted_ = 0;
+    // Pipeline mode: how many of them the engine thread had finished when the
+    // event queue was last emptied. All their events have been published.
+    std::uint64_t commands_answered_ = 0;
     bool shutting_down_ = false;
 
     // Inline mode uses engine_; pipeline mode uses pipeline_, which owns its

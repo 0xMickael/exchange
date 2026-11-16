@@ -25,6 +25,9 @@ constexpr std::string_view usage =
     "                             inline: one thread does everything\n"
     "  --engine-wait backoff|spin what the engine thread does when idle (pipeline mode)\n"
     "                             backoff: sleeps in short naps (default)\n"
+    "                             spin: never sleeps, and uses a whole core\n"
+    "  --network-wait sleep|spin  what the network thread does when idle\n"
+    "                             sleep: waits in the kernel for news (default)\n"
     "                             spin: never sleeps, and uses a whole core\n";
 
 // Set before the signal handlers are installed and never changed afterwards.
@@ -67,6 +70,18 @@ bool parse_wait(std::string_view text, exchange::server::EngineWait& wait) {
     return false;
 }
 
+bool parse_network_wait(std::string_view text, exchange::server::NetworkWait& wait) {
+    if (text == "sleep") {
+        wait = exchange::server::NetworkWait::Sleep;
+        return true;
+    }
+    if (text == "spin") {
+        wait = exchange::server::NetworkWait::Spin;
+        return true;
+    }
+    return false;
+}
+
 // Stores the value of one option. Returns false if the option or its value is not valid.
 bool apply_option(std::string_view name, std::string_view value,
                   exchange::server::ServerConfig& config) {
@@ -82,6 +97,9 @@ bool apply_option(std::string_view name, std::string_view value,
     }
     if (name == "--engine-wait") {
         return parse_wait(value, config.pipeline.wait);
+    }
+    if (name == "--network-wait") {
+        return parse_network_wait(value, config.network_wait);
     }
     return false;
 }

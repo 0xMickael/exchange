@@ -1,12 +1,9 @@
 #include "exchange/server/engine_pipeline.hpp"
 
 #include "exchange/core/matching_engine.hpp"
-#include "exchange/net/file_descriptor.hpp"
 #include "support/random_commands.hpp"
 
 #include <gtest/gtest.h>
-
-#include <sys/eventfd.h>
 
 #include <chrono>
 #include <cstddef>
@@ -25,12 +22,9 @@ void take_available(EnginePipeline& pipeline, std::vector<Event>& events) {
 // The engine thread must change nothing about what the engine computes: the
 // same commands give the same events, in the same order, as a direct call.
 void expect_same_events_as_direct_calls(std::size_t queue_capacity, EngineWait wait) {
-    const net::FileDescriptor notify(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
-    ASSERT_TRUE(notify.valid());
     EnginePipeline pipeline(PipelineConfig{.command_queue_capacity = queue_capacity,
                                            .event_queue_capacity = queue_capacity,
-                                           .wait = wait},
-                            notify.get());
+                                           .wait = wait});
     pipeline.start();
 
     test::RandomCommands commands(
@@ -72,32 +66,35 @@ TEST(EnginePipeline, MatchesDirectCallsWhenTheEngineThreadSleeps) {
     expect_same_events_as_direct_calls(64, EngineWait::Backoff);
 }
 
-TEST(EnginePipeline, NotifiesWhenEventsAreAvailable) {
-    const net::FileDescriptor notify(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
-    ASSERT_TRUE(notify.valid());
-    EnginePipeline pipeline(PipelineConfig{}, notify.get());
+// The network thread decides whether it may sleep by comparing processed()
+// with the number of commands it submitted. That is only sound if a command is
+// counted after its events are queued, never before.
+TEST(EnginePipeline, CountsACommandOnceItsEventsAreQueued) {
+    EnginePipeline pipeline(PipelineConfig{});
     pipeline.start();
+    EXPECT_EQ(pipeline.processed(), 0U);
 
+    // A passive order produces two events: OrderAccepted and BookUpdate.
     ASSERT_TRUE(pipeline.try_submit(NewOrder{
         .session_id = 1, .client_order_id = 1, .side = Side::Buy, .price = 100, .quantity = 1}));
 
-    // The eventfd counter becomes non-zero once the engine has announced its events.
-    std::uint64_t counter = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    while (::read(notify.get(), &counter, sizeof(counter)) < 0 &&
-           std::chrono::steady_clock::now() < deadline) {
+    while (pipeline.processed() < 1 && std::chrono::steady_clock::now() < deadline) {
     }
-    EXPECT_GT(counter, 0U);
+    ASSERT_EQ(pipeline.processed(), 1U);
 
+    // Both events are available at once, with no further waiting.
     Event event;
-    EXPECT_TRUE(pipeline.try_take(event));
+    ASSERT_TRUE(pipeline.try_take(event));
     EXPECT_TRUE(std::holds_alternative<OrderAccepted>(event));
+    ASSERT_TRUE(pipeline.try_take(event));
+    EXPECT_TRUE(std::holds_alternative<BookUpdate>(event));
+    EXPECT_FALSE(pipeline.try_take(event));
 }
 
 TEST(EnginePipeline, StopsEvenWhenNobodyTakesItsEvents) {
-    const net::FileDescriptor notify(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC));
-    EnginePipeline pipeline(PipelineConfig{.command_queue_capacity = 64, .event_queue_capacity = 1},
-                            notify.get());
+    EnginePipeline pipeline(
+        PipelineConfig{.command_queue_capacity = 64, .event_queue_capacity = 1});
     pipeline.start();
     for (ClientOrderId id = 1; id <= 10; ++id) {
         static_cast<void>(pipeline.try_submit(NewOrder{.session_id = 1,
