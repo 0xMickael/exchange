@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(exchange
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Educational limit order matching engine"
     LANGUAGES CXX)
 
