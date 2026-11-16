@@ -5,7 +5,6 @@
 #include "exchange/core/order_book.hpp"
 #include "exchange/core/types.hpp"
 
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -30,10 +29,10 @@ public:
     [[nodiscard]] std::string check_invariants() const;
 
 private:
+    // What the engine remembers about a session. Its active orders are not
+    // listed here: the book knows them (OrderBook::orders_of).
     struct Session {
         ClientOrderId last_client_order_id = 0;
-        // Ordered so that closing a session cancels in increasing OrderId order.
-        std::set<OrderId> active_orders;
     };
 
     void handle(const NewOrder& command, std::vector<Event>& events);
@@ -43,8 +42,8 @@ private:
 
     void match(const NewOrder& command, OrderId order_id, Quantity& remaining,
                std::vector<Event>& events);
-    void cancel(OrderId order_id, CancelReason reason, std::vector<Event>& events);
-    void forget_active_order(SessionId session_id, OrderId order_id);
+    // Removes an order of the book and emits the events of its cancellation.
+    void cancel(const Order& order, CancelReason reason, std::vector<Event>& events);
 
     OrderBook book_;
     std::unordered_map<SessionId, Session> sessions_;

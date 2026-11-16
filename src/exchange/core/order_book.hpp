@@ -38,7 +38,9 @@ struct LevelInfo {
 //   - one ordered map per side, from price to level;
 //   - each level holds its orders in a FIFO list, oldest first;
 //   - an index from OrderId to the order's position, so that a cancel does not
-//     have to search the book.
+//     have to search the book;
+//   - a chain through the orders of each session, oldest first, so that the
+//     orders of a session that closes are found without searching the book.
 class OrderBook {
 public:
     // The order with the highest priority on `side`, or nullptr if the side is empty.
@@ -51,33 +53,52 @@ public:
     // Total remaining quantity at a price, or 0 if there is no such level.
     [[nodiscard]] Quantity level_quantity(Side side, Price price) const;
 
-    // Adds an order at the back of its level. Precondition: its id is not in the
-    // book and its remaining quantity is positive.
-    void add(const Order& order);
+    // The ids of the orders of a session, in the order they were added.
+    [[nodiscard]] std::vector<OrderId> orders_of(SessionId session_id) const;
+
+    // Adds an order at the back of its level and returns the level's new total
+    // quantity. Precondition: its id is greater than every id added before and
+    // its remaining quantity is positive.
+    Quantity add(const Order& order);
 
     // Reduces the best order of `side` by `quantity` and removes it once it is
     // fully filled. Precondition: best(side) exists and has at least `quantity` remaining.
     void fill_best(Side side, Quantity quantity);
 
-    // Removes an order with whatever quantity it has left. Precondition: find(id) exists.
-    void remove(OrderId id);
+    // Removes an order with whatever quantity it has left and returns the total
+    // quantity left at its level, 0 if the level is gone. Precondition: find(id) exists.
+    Quantity remove(OrderId id);
 
     // All levels of a side, best price first.
     [[nodiscard]] std::vector<LevelInfo> levels(Side side) const;
 
     [[nodiscard]] std::size_t order_count() const noexcept { return index_.size(); }
 
-    // Verifies invariants I1 to I5 of SPEC section 5.6. Returns an empty string
+    // Verifies invariants I1 to I6 of SPEC section 5.6. Returns an empty string
     // if they hold, otherwise a description of the first violation. Costs a full
     // traversal of the book: for tests, not for the hot path.
     [[nodiscard]] std::string check_invariants() const;
 
 private:
+    // An order and its place in the chain of its session's orders. The chain
+    // is made of pointers stored in the orders themselves: adding or removing
+    // an order updates its neighbors and needs no memory of its own. Pointers
+    // to elements of a std::list stay valid until the element is erased.
+    struct Node {
+        Order order;
+        Node* previous_of_session = nullptr;
+        Node* next_of_session = nullptr;
+    };
     struct Level {
         Quantity total_quantity = 0;
-        std::list<Order> orders;
+        std::list<Node> orders;
     };
     using Levels = std::map<Price, Level>;
+    // Both ends of the chain of one session's orders.
+    struct SessionOrders {
+        Node* oldest = nullptr;
+        Node* newest = nullptr;
+    };
 
     [[nodiscard]] Levels& levels_of(Side side) noexcept {
         return side == Side::Buy ? bids_ : asks_;
@@ -86,13 +107,19 @@ private:
         return side == Side::Buy ? bids_ : asks_;
     }
 
+    // Takes an order out of the chain of its session.
+    void unlink_from_session(Node& node);
+
     [[nodiscard]] std::string check_level(Side side, Price price, const Level& level) const;
+    [[nodiscard]] std::string check_sessions() const;
 
     // Both maps are sorted by increasing price, so the best bid is the last
     // entry of bids_ and the best ask is the first entry of asks_.
     Levels bids_;
     Levels asks_;
-    std::unordered_map<OrderId, std::list<Order>::iterator> index_;
+    std::unordered_map<OrderId, std::list<Node>::iterator> index_;
+    // Holds only the sessions that have at least one order in the book.
+    std::unordered_map<SessionId, SessionOrders> sessions_;
 };
 
 } // namespace exchange
