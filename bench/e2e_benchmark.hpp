@@ -29,6 +29,8 @@ struct E2eConfig {
     WorkloadConfig workload;
     std::vector<ServerKind> servers = {ServerKind::Inline, ServerKind::PipelineBackoff,
                                        ServerKind::PipelineSpin};
+    // Whether the server's network thread polls instead of sleeping when idle.
+    bool network_spin = false;
     std::size_t connections = 1;
     // Measured requests sent by each connection.
     std::size_t requests = 100'000;

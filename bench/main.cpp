@@ -47,6 +47,8 @@ constexpr std::string_view usage =
     "each server mode.\n"
     "\n"
     "  --server S              inline, pipeline, pipeline-spin or all (default all)\n"
+    "  --network-wait W        sleep or spin: what the server's network thread does\n"
+    "                          when idle (default sleep)\n"
     "  --connections N         client connections, one thread each (default 1)\n"
     "  --requests N            measured requests per connection (default 100000)\n"
     "  --rate R                requests per second per connection on a fixed schedule;\n"
@@ -247,6 +249,11 @@ int run_e2e(std::span<char*> arguments) {
              }
              config.servers = choice->second;
              return true;
+         }},
+        {"--network-wait",
+         [&config](std::string_view text) {
+             config.network_spin = text == "spin";
+             return text == "spin" || text == "sleep";
          }},
         {"--connections", number_into(config.connections)},
         {"--requests", number_into(config.requests)},

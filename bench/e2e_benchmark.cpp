@@ -286,9 +286,10 @@ private:
     std::string error_;
 };
 
-server::ServerConfig server_config(ServerKind kind) {
+server::ServerConfig server_config(ServerKind kind, bool network_spin) {
     server::ServerConfig config;
     config.port = 0;
+    config.network_wait = network_spin ? server::NetworkWait::Spin : server::NetworkWait::Sleep;
     config.mode =
         kind == ServerKind::Inline ? server::ServerMode::Inline : server::ServerMode::Pipeline;
     config.pipeline.wait =
@@ -303,6 +304,15 @@ struct RunState {
     std::atomic<bool> failed{false};
     std::atomic<bool> go{false};
 };
+
+// Sleeps until `counter` reaches `expected`. The thread that coordinates a run
+// must not spin while it waits: it would keep a core busy during the
+// measurement, next to the threads being measured.
+void wait_until_reached(const std::atomic<std::size_t>& counter, std::size_t expected) {
+    for (std::size_t seen = counter.load(); seen < expected; seen = counter.load()) {
+        counter.wait(seen);
+    }
+}
 
 struct ConnectionOutcome {
     std::vector<std::uint64_t> samples; // In clock ticks.
@@ -321,6 +331,7 @@ void drive_connection(std::uint16_t port, const E2eConfig& config, std::size_t i
             state.failed = true;
         }
         ++state.prepared;
+        state.prepared.notify_one();
         while (!state.go.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
@@ -334,8 +345,10 @@ void drive_connection(std::uint16_t port, const E2eConfig& config, std::size_t i
         outcome.error = exception.what();
         state.failed = true;
         ++state.prepared;
+        state.prepared.notify_one();
     }
     ++state.finished;
+    state.finished.notify_one();
 }
 
 // One run against a new server: every connection prepares, then all of them
@@ -343,7 +356,7 @@ void drive_connection(std::uint16_t port, const E2eConfig& config, std::size_t i
 std::optional<EngineRunResult> run_once(ServerKind kind, const E2eConfig& config,
                                         const BenchClock& clock, std::uint64_t& cancel_rejects,
                                         std::string& error) {
-    server::Server server(server_config(kind));
+    server::Server server(server_config(kind, config.network_spin));
     std::jthread server_thread([&server] { server.run(); });
 
     const std::uint64_t interval_ticks =
@@ -361,14 +374,10 @@ std::optional<EngineRunResult> run_once(ServerKind kind, const E2eConfig& config
         });
     }
 
-    while (state.prepared.load() < config.connections) {
-        std::this_thread::yield();
-    }
+    wait_until_reached(state.prepared, config.connections);
     const auto begin = std::chrono::steady_clock::now();
     state.go.store(true, std::memory_order_release);
-    while (state.finished.load() < config.connections) {
-        std::this_thread::yield();
-    }
+    wait_until_reached(state.finished, config.connections);
     const auto end = std::chrono::steady_clock::now();
     clients.clear();
     server.request_stop();
@@ -500,6 +509,8 @@ void print_e2e_report(std::ostream& out, const Environment& environment, const E
         << "  latency: from just before the request is given to the kernel until its answer\n"
         << "  has been read by the client; fills that follow the answer are not waited for\n"
         << "  client threads spin on non-blocking sockets and never sleep\n"
+        << "  server network thread: "
+        << (config.network_spin ? "never sleeps (--network-wait spin)" : "sleeps when idle") << '\n'
         << "  clock: " << result.clock.name << ", smallest measurable interval " << std::fixed
         << std::setprecision(1) << result.clock.smallest_interval_ns << " ns\n"
         << "  " << config.runs << " run(s) per server, each against a new server\n\n";
@@ -534,7 +545,8 @@ void print_e2e_json(std::ostream& out, const Environment& environment, const E2e
         << ", \"price_levels\": " << workload.price_levels
         << ", \"cancel_percent\": " << workload.cancel_percent
         << ", \"aggressive_percent\": " << workload.aggressive_percent << "},\n"
-        << "  \"method\": {\"runs\": " << config.runs << ", \"clock\": \"" << result.clock.name
+        << "  \"method\": {\"runs\": " << config.runs << ", \"network_wait\": \""
+        << (config.network_spin ? "spin" : "sleep") << "\", \"clock\": \"" << result.clock.name
         << "\", \"clock_smallest_interval_ns\": " << std::setprecision(1)
         << result.clock.smallest_interval_ns << "},\n"
         << "  \"servers\": [";
