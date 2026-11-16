@@ -329,6 +329,8 @@ TEST(E2eBenchmark, ReportsContainEveryServer) {
         EXPECT_NE(json.str().find("\"server\": \"" + name + "\""), std::string::npos) << name;
     }
     EXPECT_NE(text.str().find("closed loop"), std::string::npos);
+    // Numbers are written out in full, never in scientific notation.
+    EXPECT_EQ(text.str().find("e+"), std::string::npos) << text.str();
     EXPECT_NE(json.str().find("\"loop\": \"closed\""), std::string::npos);
 }
 

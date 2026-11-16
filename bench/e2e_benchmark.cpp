@@ -500,7 +500,7 @@ void print_e2e_report(std::ostream& out, const Environment& environment, const E
         << "  latency: from just before the request is given to the kernel until its answer\n"
         << "  has been read by the client; fills that follow the answer are not waited for\n"
         << "  client threads spin on non-blocking sockets and never sleep\n"
-        << "  clock: " << result.clock.name << ", smallest measurable interval "
+        << "  clock: " << result.clock.name << ", smallest measurable interval " << std::fixed
         << std::setprecision(1) << result.clock.smallest_interval_ns << " ns\n"
         << "  " << config.runs << " run(s) per server, each against a new server\n\n";
 
